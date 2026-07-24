@@ -1,0 +1,176 @@
+{
+  "feature_name": "segmentation",
+  "display_name": "Segmentation",
+  "description": "分割模型相关功能，按训练、单图推理、批量自动标注拆分为独立子功能。",
+  "preferred_conda_env": "onnx-gpu",
+  "default_project_name": "default",
+  "actions": [
+    {
+      "action_name": "train",
+      "display_name": "训练",
+      "description": "训练分割模型。",
+      "entry": {
+        "type": "script",
+        "value": "train.py"
+      },
+      "output": {
+        "arg_name": "save_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "img_dir",
+          "ann_dir",
+          "model",
+          "image_size",
+          "task_type",
+          "label_name",
+          "label_names",
+          "epochs",
+          "batch_size",
+          "lr",
+          "val_split",
+          "patience",
+          "product",
+          "warmup_epochs",
+          "class_weight_mult",
+          "num_workers",
+          "pretrained_ckpt",
+          "strict_load",
+          "save_dir"
+        ]
+      },
+      "field_overrides": {
+        "img_dir": {
+          "label": "图片目录",
+          "widget": "path",
+          "placeholder": "选择训练图片目录"
+        },
+        "ann_dir": {
+          "label": "标注目录",
+          "widget": "path",
+          "placeholder": "选择训练标注目录"
+        },
+        "model": {
+          "label": "模型结构",
+          "help": "优先使用 cosmos/train/models 中的 MicroUNet；缺失时回退到工具箱本地实现。"
+        },
+        "task_type": {
+          "label": "任务类型",
+          "widget": "select",
+          "choices": ["binary", "multilabel"],
+          "default": "binary"
+        },
+        "label_names": {
+          "label": "多标签名称",
+          "placeholder": "multilabel 示例：ear knife circle"
+        },
+        "pretrained_ckpt": {
+          "label": "预训练权重",
+          "widget": "path",
+          "placeholder": "可选，选择已有 .pth 权重"
+        },
+        "save_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "predict_single_image",
+      "display_name": "单张图片推理",
+      "description": "对单张图片执行分割推理并保存结果。",
+      "entry": {
+        "type": "script",
+        "value": "tools/predict_single_image.py"
+      },
+      "output": {
+        "arg_name": "save",
+        "use_artifacts_subdir": true,
+        "default_file_name": "prediction.png"
+      },
+      "ui": {
+        "field_order": [
+          "image",
+          "ckpt",
+          "model_name",
+          "tile_size",
+          "center_size",
+          "batch_size",
+          "thresh",
+          "fp16",
+          "save"
+        ]
+      },
+      "field_overrides": {
+        "image": {
+          "label": "输入图片",
+          "widget": "path",
+          "placeholder": "选择待推理图片"
+        },
+        "ckpt": {
+          "label": "模型权重",
+          "widget": "path",
+          "placeholder": "选择 .pth/.pt/.ckpt 权重或 .onnx 模型"
+        },
+        "model_name": {
+          "label": "模型名称"
+        },
+        "save": {
+          "label": "输出图片路径",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "auto_label_folder",
+      "display_name": "批量自动标注",
+      "description": "批量处理图片目录，输出预测后的多边形标注 JSON。",
+      "entry": {
+        "type": "script",
+        "value": "tools/auto_label_folder.py"
+      },
+      "output": {
+        "arg_name": "out_ann_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "img_dir",
+          "ckpt",
+          "model",
+          "device",
+          "prob_thresh",
+          "min_area",
+          "approx_epsilon",
+          "close_kernel",
+          "open_kernel",
+          "overwrite",
+          "allow_large_images",
+          "max_image_pixels",
+          "out_ann_dir"
+        ]
+      },
+      "field_overrides": {
+        "img_dir": {
+          "label": "图片目录",
+          "widget": "path",
+          "placeholder": "选择待自动标注的图片目录"
+        },
+        "ckpt": {
+          "label": "模型权重",
+          "widget": "path",
+          "placeholder": "选择 .pth 权重文件"
+        },
+        "out_ann_dir": {
+          "label": "标注输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    }
+  ]
+}

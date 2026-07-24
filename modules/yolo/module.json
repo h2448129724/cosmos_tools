@@ -1,0 +1,153 @@
+{
+  "feature_name": "yolo",
+  "display_name": "YOLO Trainer",
+  "description": "基于 Ultralytics 的 YOLO 训练、推理与 ONNX 导出入口，支持 detect/segment/classify/pose，收录 YOLO11/YOLO26 模型家族。",
+  "preferred_conda_env": "onnx-gpu",
+  "default_project_name": "default",
+  "actions": [
+    {
+      "action_name": "train",
+      "display_name": "训练",
+      "entry": {
+        "type": "module",
+        "value": "yolo.train"
+      },
+      "output": {
+        "arg_name": "save_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "data",
+          "task",
+          "model_series",
+          "model_size",
+          "custom_model",
+          "epochs",
+          "imgsz",
+          "batch",
+          "device",
+          "workers",
+          "patience",
+          "seed",
+          "cache",
+          "amp",
+          "run_name",
+          "save_dir"
+        ]
+      },
+      "field_overrides": {
+        "data": {
+          "label": "数据集路径",
+          "widget": "path",
+          "path_mode": "open_file",
+          "placeholder": "选择 data.yaml"
+        },
+        "custom_model": {
+          "label": "自定义权重",
+          "widget": "path"
+        },
+        "save_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "export_onnx",
+      "display_name": "导出 ONNX",
+      "entry": {
+        "type": "module",
+        "value": "yolo.scripts.export_onnx"
+      },
+      "output": {
+        "arg_name": "output",
+        "use_artifacts_subdir": true,
+        "default_file_name": "model.onnx"
+      },
+      "field_overrides": {
+        "model": {
+          "label": "PyTorch 权重",
+          "widget": "path"
+        },
+        "output": {
+          "label": "ONNX 输出路径",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "predict",
+      "display_name": "推理预测",
+      "entry": {
+        "type": "module",
+        "value": "yolo.predict"
+      },
+      "output": {
+        "arg_name": "output_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "source",
+          "model",
+          "task",
+          "imgsz",
+          "conf",
+          "iou",
+          "device",
+          "save",
+          "save_txt",
+          "save_conf",
+          "save_crop",
+          "output_dir"
+        ]
+      },
+      "field_overrides": {
+        "source": {
+          "label": "输入路径",
+          "widget": "path"
+        },
+        "model": {
+          "label": "模型权重",
+          "widget": "path"
+        },
+        "output_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        },
+        "task": {
+          "label": "任务类型"
+        },
+        "imgsz": {
+          "label": "图像尺寸"
+        },
+        "conf": {
+          "label": "置信度阈值"
+        },
+        "iou": {
+          "label": "NMS IoU 阈值"
+        },
+        "device": {
+          "label": "推理设备"
+        },
+        "save": {
+          "label": "保存结果图像"
+        },
+        "save_txt": {
+          "label": "保存标签文件"
+        },
+        "save_conf": {
+          "label": "保存置信度"
+        },
+        "save_crop": {
+          "label": "保存裁剪区域"
+        }
+      }
+    }
+  ]
+}

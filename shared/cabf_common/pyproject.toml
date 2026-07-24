@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cabf-common"
+version = "1.2.0"
+description = "CAB-F master annotation schema, normalization, validation, and export helpers"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cabf*"]

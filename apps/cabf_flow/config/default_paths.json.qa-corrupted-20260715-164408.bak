@@ -1,0 +1,27 @@
+{
+  "repo_root": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox",
+  "img_tools_root": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox",
+  "train_model_modules_root": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox\\modules",
+  "dataset_root": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox\\artifacts\\ui_capability_gallery_1100x700\\workspace",
+  "pending_filter_dir": "",
+  "filtered_keep_dir": "",
+  "master_images_dir": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox\\artifacts\\ui_capability_gallery_1100x700\\workspace\\images",
+  "master_annotations_dir": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox\\artifacts\\ui_capability_gallery_1100x700\\workspace\\annotations",
+  "point_predictions_dir": "",
+  "edge_predictions_dir": "",
+  "model_a_export_root": "",
+  "model_b_export_root": "",
+  "weights": {
+    "sew_point_onnx": "",
+    "sew_point_connector_pth": ""
+  },
+  "predict": {
+    "point_threshold": "0.30",
+    "point_distance_threshold": "3.00",
+    "edge_postprocess_preset": "balanced"
+  },
+  "outputs": {
+    "sew_point_train_out": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox\\artifacts\\ui_capability_gallery_1100x700\\workspace\\outputs\\sew_point",
+    "sew_point_conntect_train_out": "D:\\project\\changrui\\cosmos\\tools\\cosmos_toolbox\\artifacts\\ui_capability_gallery_1100x700\\workspace\\outputs\\sew_point_connect"
+  }
+}

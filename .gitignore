@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+workspace/
+runs/
+artifacts/
+checkpoints/
+.trash/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.onnx.data

@@ -1,0 +1,21 @@
+# segmentation
+numpy
+pillow
+torch
+torchvision
+tqdm
+matplotlib
+albumentations
+opencv-python
+
+# sew_point
+scipy
+onnx>=1.12.0,<2.0.0
+onnxruntime
+
+# yolo
+ultralytics
+scikit-learn
+
+# trainer_gui
+PySide6

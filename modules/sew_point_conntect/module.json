@@ -1,0 +1,510 @@
+{
+  "feature_name": "sew_point_conntect",
+  "display_name": "Sew Point Connect",
+  "description": "针点连边模型相关功能，按训练、单样本推理、批量预测拆分。",
+  "preferred_conda_env": "onnx-gpu",
+  "default_project_name": "default",
+  "actions": [
+    {
+      "action_name": "train",
+      "display_name": "训练",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.train"
+      },
+      "output": {
+        "arg_name": "save_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "image_dir",
+          "annotation_dir",
+          "model_name",
+          "point_source",
+          "stage1_model_path",
+          "stage1_threshold",
+          "stage1_cluster_dist",
+          "stage1_disable_tta",
+          "perturb_jitter_std_ratio",
+          "perturb_drop_prob",
+          "perturb_spurious_prob",
+          "epochs",
+          "batch_size",
+          "lr",
+          "weight_decay",
+          "warmup_epochs",
+          "val_ratio",
+          "seed",
+          "hidden_dim",
+          "num_layers",
+          "dropout",
+          "k_neighbors",
+          "radius_multiplier",
+          "default_spacing",
+          "threshold",
+          "patch_width",
+          "patch_height",
+          "save_dir"
+        ]
+      },
+      "field_overrides": {
+        "image_dir": {
+          "label": "图片目录",
+          "widget": "path",
+          "group": "数据配置"
+        },
+        "annotation_dir": {
+          "label": "标注目录",
+          "widget": "path",
+          "group": "数据配置"
+        },
+        "model_name": {
+          "label": "模型结构",
+          "group": "模型参数",
+          "help": "优先使用 cosmos/train/models 中的 EdgeGraphNet。"
+        },
+        "point_source": {
+          "label": "点来源模式",
+          "group": "数据配置",
+          "help": "gt=仅真值点，perturb=仅扰动点，predicted=仅阶段一预测点，mixed=三者混合"
+        },
+        "stage1_model_path": {
+          "label": "阶段一模型权重",
+          "widget": "path",
+          "group": "数据配置"
+        },
+        "stage1_threshold": {
+          "label": "阶段一阈值",
+          "group": "模型参数"
+        },
+        "stage1_cluster_dist": {
+          "label": "阶段一聚类半径",
+          "group": "模型参数"
+        },
+        "stage1_disable_tta": {
+          "label": "关闭阶段一 TTA",
+          "group": "高级参数"
+        },
+        "perturb_jitter_std_ratio": {
+          "label": "扰动强度",
+          "group": "高级参数"
+        },
+        "perturb_drop_prob": {
+          "label": "删点概率",
+          "group": "高级参数"
+        },
+        "perturb_spurious_prob": {
+          "label": "伪点概率",
+          "group": "高级参数"
+        },
+        "epochs": {
+          "group": "训练参数"
+        },
+        "batch_size": {
+          "group": "训练参数"
+        },
+        "lr": {
+          "group": "训练参数"
+        },
+        "weight_decay": {
+          "group": "训练参数"
+        },
+        "warmup_epochs": {
+          "group": "训练参数"
+        },
+        "val_ratio": {
+          "group": "训练参数"
+        },
+        "seed": {
+          "group": "高级参数"
+        },
+        "hidden_dim": {
+          "group": "模型参数"
+        },
+        "num_layers": {
+          "group": "模型参数"
+        },
+        "dropout": {
+          "group": "模型参数"
+        },
+        "k_neighbors": {
+          "group": "模型参数"
+        },
+        "radius_multiplier": {
+          "group": "模型参数"
+        },
+        "default_spacing": {
+          "group": "模型参数"
+        },
+        "threshold": {
+          "group": "模型参数"
+        },
+        "patch_width": {
+          "group": "模型参数"
+        },
+        "patch_height": {
+          "group": "模型参数"
+        },
+        "save_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "export_onnx",
+      "display_name": "导出 split ONNX",
+      "description": "从同一个 Sew Point Connect checkpoint 导出 Connector 图网络和 Patch Encoder 两个生产 ONNX，并执行静态、动态输入数值一致性验证。",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.export_onnx"
+      },
+      "output": {
+        "arg_name": "onnx_out",
+        "use_artifacts_subdir": true,
+        "default_file_name": "connector.onnx",
+        "extra_outputs": [
+          {
+            "arg_name": "patch_onnx_out",
+            "default_file_name": "connector_patch.onnx"
+          }
+        ]
+      },
+      "ui": {
+        "field_order": [
+          "checkpoint",
+          "annotation_json",
+          "image",
+          "device",
+          "opset",
+          "max_abs_diff",
+          "patch_batch_size"
+        ]
+      },
+      "field_overrides": {
+        "checkpoint": {
+          "label": "PyTorch 权重",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "模型"
+        },
+        "onnx_out": {
+          "label": "Connector ONNX 输出",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        },
+        "patch_onnx_out": {
+          "label": "Patch ONNX 输出",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        },
+        "annotation_json": {
+          "label": "验证标注 JSON（可选）",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "真实样本验证"
+        },
+        "image": {
+          "label": "验证图片（可选）",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "真实样本验证"
+        },
+        "device": {
+          "label": "导出设备",
+          "help": "默认 CPU，避免本机 CUDA/cuDNN 动态库缺失影响导出验证。",
+          "group": "导出设置"
+        },
+        "opset": {
+          "label": "ONNX Opset",
+          "group": "导出设置"
+        },
+        "max_abs_diff": {
+          "label": "最大允许绝对误差",
+          "group": "验证设置"
+        },
+        "patch_batch_size": {
+          "label": "Patch 推理批大小",
+          "group": "部署参数"
+        }
+      }
+    },
+    {
+      "action_name": "evaluate_pipeline",
+      "display_name": "端到端验证",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.evaluate_pipeline"
+      },
+      "output": {
+        "arg_name": "output_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "image_dir",
+          "annotation_dir",
+          "stage1_model_path",
+          "stage2_model_path",
+          "stage1_threshold",
+          "stage1_cluster_dist",
+          "stage1_disable_tta",
+          "stage2_threshold",
+          "stage2_postprocess_preset",
+          "stage2_max_degree",
+          "stage2_max_small_cycle_length",
+          "stage2_continuity_weight",
+          "stage2_cycle_penalty",
+          "output_dir"
+        ]
+      },
+      "field_overrides": {
+        "image_dir": {
+          "label": "图片目录",
+          "widget": "path"
+        },
+        "annotation_dir": {
+          "label": "标注目录",
+          "widget": "path"
+        },
+        "stage1_model_path": {
+          "label": "阶段一模型权重",
+          "widget": "path"
+        },
+        "stage2_model_path": {
+          "label": "阶段二模型权重",
+          "widget": "path"
+        },
+        "stage1_threshold": {
+          "label": "阶段一阈值"
+        },
+        "stage1_cluster_dist": {
+          "label": "阶段一聚类半径"
+        },
+        "stage1_disable_tta": {
+          "label": "关闭阶段一 TTA"
+        },
+        "stage2_threshold": {
+          "label": "阶段二阈值"
+        },
+        "stage2_postprocess_preset": {
+          "label": "后处理预设"
+        },
+        "stage2_max_degree": {
+          "label": "最大度约束"
+        },
+        "stage2_max_small_cycle_length": {
+          "label": "最大小环长度"
+        },
+        "stage2_continuity_weight": {
+          "label": "连续性权重"
+        },
+        "stage2_cycle_penalty": {
+          "label": "环惩罚权重"
+        },
+        "output_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "infer_single",
+      "display_name": "单样本推理",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.infer"
+      },
+      "output": {
+        "arg_name": "save_path",
+        "use_artifacts_subdir": true,
+        "default_file_name": "result.json"
+      },
+      "field_overrides": {
+        "json_path": {
+          "label": "标注文件",
+          "widget": "path"
+        },
+        "image_path": {
+          "label": "对应图片",
+          "widget": "path"
+        },
+        "model_path": {
+          "label": "模型权重",
+          "widget": "path"
+        },
+        "save_path": {
+          "label": "输出 JSON",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "visualize_onnx_pipeline",
+      "display_name": "ONNX 全流程可视化",
+      "description": "依次运行 Sew Point ONNX 与 Sew Point Connect split ONNX，并输出关键点、连边叠加图和预测 JSON。支持训练尺寸图与生产一致的大图中心滑窗模式。",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.visualize_onnx_pipeline"
+      },
+      "output": {
+        "arg_name": "output_image",
+        "use_artifacts_subdir": true,
+        "default_file_name": "sew_point_connect_visualization.png",
+        "extra_outputs": [
+          {
+            "arg_name": "output_json",
+            "default_file_name": "sew_point_connect_predictions.json"
+          }
+        ]
+      },
+      "ui": {
+        "field_order": [
+          "image_path",
+          "point_model",
+          "connector_model",
+          "patch_model",
+          "mode",
+          "point_threshold",
+          "connector_threshold",
+          "cluster_dist",
+          "tile_size",
+          "stride",
+          "batch_size",
+          "patch_batch_size"
+        ]
+      },
+      "field_overrides": {
+        "image_path": {
+          "label": "输入图片",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "输入"
+        },
+        "point_model": {
+          "label": "Sew Point ONNX",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "模型"
+        },
+        "connector_model": {
+          "label": "Connector ONNX（图网络）",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "模型"
+        },
+        "patch_model": {
+          "label": "Connector Patch ONNX",
+          "widget": "path",
+          "path_mode": "open_file",
+          "group": "模型"
+        },
+        "mode": {
+          "label": "图片类型",
+          "help": "small：与训练图片大小一致，整图单次推理；large：普通重叠滑窗找点、合并后再找边，与 density 无关。",
+          "group": "推理方式"
+        },
+        "point_threshold": {
+          "label": "关键点阈值",
+          "group": "阈值"
+        },
+        "connector_threshold": {
+          "label": "连边阈值",
+          "group": "阈值"
+        },
+        "cluster_dist": {
+          "label": "关键点合并距离",
+          "group": "大图滑窗"
+        },
+        "tile_size": {
+          "label": "滑窗尺寸",
+          "group": "大图滑窗"
+        },
+        "stride": {
+          "label": "滑窗步长",
+          "help": "小于滑窗尺寸时产生重叠区域，重复关键点由合并距离去重。",
+          "group": "大图滑窗"
+        },
+        "batch_size": {
+          "label": "滑窗批大小",
+          "group": "性能"
+        },
+        "patch_batch_size": {
+          "label": "边 Patch 批大小",
+          "group": "性能"
+        },
+        "output_image": {
+          "label": "输出可视化图片",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        },
+        "output_json": {
+          "label": "输出预测 JSON",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "batch_predict",
+      "display_name": "批量预测",
+      "entry": {
+        "type": "module",
+        "value": "sew_point_conntect.batch_predict"
+      },
+      "output": {
+        "arg_name": "output_annotation_dir",
+        "use_artifacts_subdir": true,
+        "extra_outputs": [
+          {
+            "arg_name": "vis_dir"
+          }
+        ]
+      },
+      "ui": {
+        "field_order": [
+          "image_dir",
+          "annotation_dir",
+          "model_path",
+          "output_annotation_dir",
+          "vis_dir",
+          "threshold",
+          "no_compare_gt"
+        ]
+      },
+      "field_overrides": {
+        "image_dir": {
+          "label": "图片目录",
+          "widget": "path"
+        },
+        "annotation_dir": {
+          "label": "标注目录",
+          "widget": "path"
+        },
+        "model_path": {
+          "label": "模型权重",
+          "widget": "path"
+        },
+        "output_annotation_dir": {
+          "label": "输出标注目录",
+          "widget": "path",
+          "default": ""
+        },
+        "vis_dir": {
+          "label": "可视化输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    }
+  ]
+}

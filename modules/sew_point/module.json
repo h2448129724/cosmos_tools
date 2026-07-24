@@ -1,0 +1,246 @@
+{
+  "feature_name": "sew_point",
+  "display_name": "Sew Point",
+  "description": "针点关键点检测相关功能，按训练、单图推理、批量推理、大图推理、导出 ONNX 拆分。",
+  "preferred_conda_env": "onnx-gpu",
+  "default_project_name": "default",
+  "actions": [
+    {
+      "action_name": "train",
+      "display_name": "训练",
+      "entry": {
+        "type": "module",
+        "value": "sew_point.train"
+      },
+      "output": {
+        "arg_name": "save_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "hidden_fields": [
+          "predict",
+          "threshold",
+          "model"
+        ],
+        "field_order": [
+          "img_dir",
+          "ann_dir",
+          "model_name",
+          "img_size",
+          "sigma",
+          "batch_size",
+          "lr",
+          "epochs",
+          "val_ratio",
+          "seed",
+          "save_dir",
+          "aug_multiplier",
+          "warmup_epochs",
+          "num_workers"
+        ]
+      },
+      "field_overrides": {
+        "img_dir": {
+          "label": "图片目录",
+          "widget": "path",
+          "group": "数据配置",
+          "placeholder": "选择训练图片目录"
+        },
+        "ann_dir": {
+          "label": "标注目录",
+          "widget": "path",
+          "group": "数据配置",
+          "placeholder": "选择训练标注目录"
+        },
+        "model_name": {
+          "label": "模型结构",
+          "default": "sew_point_unet",
+          "group": "模型参数",
+          "help": "按 Cosmos 模型注册中心解析；当前使用工具箱本地 Sew Point UNet。"
+        },
+        "img_size": {
+          "group": "模型参数"
+        },
+        "sigma": {
+          "group": "模型参数"
+        },
+        "batch_size": {
+          "group": "训练参数"
+        },
+        "lr": {
+          "group": "训练参数"
+        },
+        "epochs": {
+          "group": "训练参数"
+        },
+        "val_ratio": {
+          "group": "训练参数"
+        },
+        "seed": {
+          "group": "高级参数"
+        },
+        "save_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        },
+        "aug_multiplier": {
+          "group": "高级参数"
+        },
+        "warmup_epochs": {
+          "group": "训练参数"
+        },
+        "num_workers": {
+          "group": "高级参数"
+        }
+      }
+    },
+    {
+      "action_name": "single_inference",
+      "display_name": "单张图片推理",
+      "entry": {
+        "type": "module",
+        "value": "sew_point.inference"
+      },
+      "output": {
+        "arg_name": "output_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "image",
+          "model",
+          "model_name",
+          "threshold",
+          "cluster_dist",
+          "output_dir"
+        ],
+        "hidden_fields": [
+          "image_dir"
+        ]
+      },
+      "field_overrides": {
+        "image": {
+          "label": "输入图片",
+          "widget": "path",
+          "placeholder": "选择单张图片"
+        },
+        "model": {
+          "label": "模型权重",
+          "widget": "path",
+          "placeholder": "选择 .pth 权重"
+        },
+        "model_name": {
+          "label": "模型结构",
+          "default": "sew_point_unet"
+        },
+        "output_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "batch_infer",
+      "display_name": "批量小图推理",
+      "entry": {
+        "type": "module",
+        "value": "sew_point.tools.batch_infer"
+      },
+      "output": {
+        "arg_name": "output_dir",
+        "use_artifacts_subdir": true
+      },
+      "ui": {
+        "field_order": [
+          "input_dir",
+          "output_dir",
+          "model",
+          "threshold",
+          "cluster_dist",
+          "device",
+          "output_format",
+          "label",
+          "overwrite_json"
+        ]
+      },
+      "field_overrides": {
+        "input_dir": {
+          "label": "图片目录",
+          "widget": "path",
+          "placeholder": "选择待批量推理图片目录"
+        },
+        "output_dir": {
+          "label": "输出目录",
+          "widget": "path",
+          "default": ""
+        },
+        "model": {
+          "label": "ONNX 模型",
+          "widget": "path",
+          "placeholder": "选择 .onnx 模型"
+        }
+      }
+    },
+    {
+      "action_name": "large_image_infer",
+      "display_name": "大图滑窗推理",
+      "entry": {
+        "type": "module",
+        "value": "sew_point.tools.predict_large_image"
+      },
+      "output": {
+        "arg_name": "output",
+        "use_artifacts_subdir": true
+      },
+      "field_overrides": {
+        "image": {
+          "label": "输入图片",
+          "widget": "path",
+          "placeholder": "选择大图"
+        },
+        "model": {
+          "label": "ONNX 模型",
+          "widget": "path",
+          "placeholder": "选择 .onnx 模型"
+        },
+        "output": {
+          "label": "输出目录",
+          "widget": "path",
+          "path_mode": "dir",
+          "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "export_onnx",
+      "display_name": "导出 ONNX",
+      "entry": {
+        "type": "script",
+        "value": "export_onnx.py"
+      },
+      "output": {
+        "arg_name": "output",
+        "use_artifacts_subdir": true,
+        "default_file_name": "model.onnx"
+      },
+      "field_overrides": {
+        "model": {
+          "label": "PyTorch 权重",
+          "widget": "path"
+        },
+        "model_name": {
+          "label": "模型结构",
+          "default": "sew_point_unet"
+        },
+        "output": {
+          "label": "ONNX 输出路径",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        }
+      }
+    }
+  ]
+}

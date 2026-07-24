@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cosmos-personal-toolbox"
+version = "0.1.0"
+description = "Personal Cosmos image, labeling, and model training toolbox"
+requires-python = ">=3.12"
+
+[project.scripts]
+cosmos-toolbox = "cosmos_toolbox.__main__:main"
+
+[tool.setuptools.packages.find]
+where = [".", "modules"]
+include = ["cosmos_toolbox*", "img_tools*", "apps*", "trainer_gui*", "segmentation*", "sew_point*", "sew_point_conntect*", "yolo*"]
+
+[tool.setuptools.package-dir]
+cabf = "shared/cabf_common/cabf"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "modules", "shared/cabf_common", "../.."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
