@@ -66,7 +66,7 @@ class AutoTileCropPage(BaseToolPage):
         self._spin_h.setValue(256)
         self._spin_h.setSuffix(" px")
         size_row.addWidget(self._spin_h)
-        self._cb_overlap = QCheckBox("允许重叠补边（保持固定切块尺寸）")
+        self._cb_overlap = QCheckBox("允许重叠补边（小图补黑，保持固定切块尺寸）")
         self._cb_overlap.setChecked(True)
         size_row.addWidget(self._cb_overlap)
         size_row.addStretch(1)
@@ -166,7 +166,7 @@ class AutoTileCropPage(BaseToolPage):
             QMessageBox.warning(self._mw, "提示", "请先选择输出目录")
             return
         self._log.clear()
-        overlap_text = "重叠补边" if self._cb_overlap.isChecked() else "边缘保留原始尺寸"
+        overlap_text = "重叠补边，小图补黑" if self._cb_overlap.isChecked() else "丢弃不足尺寸的边缘块"
         self._log.appendPlainText(f"开始裁剪: {tile_w}×{tile_h}，模式：{overlap_text}")
         self._info_label.setText(f"准备执行：切块尺寸 {tile_w} x {tile_h}，模式：{overlap_text}")
         self._worker = FuncWorker(batch_tile_crop, input_dir, output_dir, tile_w, tile_h, self._cb_overlap.isChecked())

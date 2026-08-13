@@ -12,6 +12,7 @@ class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
+    BUSINESS_NG = "business_ng"
     FAILED = "failed"
     STOPPED = "stopped"
 
@@ -162,6 +163,7 @@ class TaskCenter(QObject):
             raw_status = str(getattr(record, "status", "failed"))
             status = {
                 "success": TaskStatus.SUCCESS,
+                "business_ng": TaskStatus.BUSINESS_NG,
                 "stopped": TaskStatus.STOPPED,
                 "failed": TaskStatus.FAILED,
             }.get(raw_status, TaskStatus.FAILED)

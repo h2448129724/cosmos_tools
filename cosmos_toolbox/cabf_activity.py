@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from uuid import uuid4
 
@@ -41,6 +42,7 @@ from .task_center import TaskStatus
 
 
 _MAX_PREVIEW_DIMENSION = 4096
+_MEBIBYTE = 1024 * 1024
 
 
 def _load_preview_pixmap(path: str | Path) -> tuple[QPixmap, tuple[int, int]]:
@@ -53,7 +55,19 @@ def _load_preview_pixmap(path: str | Path) -> tuple[QPixmap, tuple[int, int]]:
     scale = min(1.0, _MAX_PREVIEW_DIMENSION / max(width, height))
     if scale < 1.0:
         reader.setScaledSize(QSize(max(1, round(width * scale)), max(1, round(height * scale))))
-    image = reader.read()
+    previous_limit = QImageReader.allocationLimit()
+    required_limit = math.ceil(width * height * 4 / _MEBIBYTE)
+    limit_changed = previous_limit > 0 and required_limit > previous_limit
+    if limit_changed:
+        # Some Qt image handlers check the unscaled 32-bit source size before
+        # honouring setScaledSize(). Keep the exception local to this bounded
+        # preview read instead of disabling the process-wide safety limit.
+        QImageReader.setAllocationLimit(required_limit)
+    try:
+        image = reader.read()
+    finally:
+        if limit_changed:
+            QImageReader.setAllocationLimit(previous_limit)
     if image.isNull():
         raise CabfConfigError(f"无法读取图片：{path}（{reader.errorString()}）")
     return QPixmap.fromImage(image), (width, height)

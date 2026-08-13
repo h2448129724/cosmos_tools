@@ -35,7 +35,7 @@ inspection:
       locating_hole:
         roi: [10, 20, 110, 120]  # keep roi comment
       decode:
-        rois: [[200, 210, 260, 270]]
+        roi: [[200, 210, 260, 270]]
     bottom:
       hook:
         roi: [30, 40, 130, 140]
@@ -55,7 +55,7 @@ def test_cabf_document_reads_sides_and_preserves_yaml_when_saving(tmp_path: Path
     assert document.project_name == "CAB-F / TEST"
     assert [field.display_name for field in document.roi_fields("top")] == [
         "inspection.conf.top.locating_hole.roi",
-        "inspection.conf.top.decode.rois",
+        "inspection.conf.top.decode.roi",
     ]
     field = document.roi_fields("top")[0]
     document.set_rects(field, [(11, 22, 111, 122)])
@@ -66,6 +66,53 @@ def test_cabf_document_reads_sides_and_preserves_yaml_when_saving(tmp_path: Path
     assert "max_overlap: 0.2" in saved
     assert "old_bottom.png" in saved
     assert config_path.with_suffix(".yaml.bak").read_text(encoding="utf-8") == original
+
+
+def test_cabf_document_discovers_empty_multi_roi_field(tmp_path: Path):
+    config_path = tmp_path / "cabf.yaml"
+    config_path.write_text(
+        """inspection:
+  project: CAB-F
+  conf:
+    bottom:
+      dense_stitch:
+        roi: []
+""",
+        encoding="utf-8",
+    )
+
+    document = CabfConfigDocument.load(config_path)
+    fields = document.roi_fields("bottom")
+
+    assert [field.display_name for field in fields] == [
+        "inspection.conf.bottom.dense_stitch.roi"
+    ]
+    assert fields[0].is_multi is True
+    assert document.rects(fields[0]) == []
+
+    document.set_rects(fields[0], [(10, 20, 110, 120), (200, 210, 260, 270)])
+    document.save_rois()
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert "roi: [[10, 20, 110, 120], [200, 210, 260, 270]]" in saved
+
+
+def test_cabf_document_does_not_accept_legacy_rois_field(tmp_path: Path):
+    config_path = tmp_path / "cabf.yaml"
+    config_path.write_text(
+        """inspection:
+  project: CAB-F
+  conf:
+    top:
+      decode_image:
+        rois: [10, 20, 110, 120]
+""",
+        encoding="utf-8",
+    )
+
+    document = CabfConfigDocument.load(config_path)
+
+    assert document.roi_fields("top") == []
 
 
 def test_cabf_document_updates_only_selected_template_and_keeps_comments(tmp_path: Path):

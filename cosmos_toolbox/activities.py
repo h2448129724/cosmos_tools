@@ -319,6 +319,7 @@ class TaskCenterActivity(QWidget):
             TaskStatus.PENDING: "等待",
             TaskStatus.RUNNING: "运行中",
             TaskStatus.SUCCESS: "完成",
+            TaskStatus.BUSINESS_NG: "业务 NG",
             TaskStatus.FAILED: "失败",
             TaskStatus.STOPPED: "停止",
         }

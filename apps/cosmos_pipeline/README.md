@@ -32,6 +32,11 @@ conda run --no-capture-output -n onnx-gpu python -u scripts/cosmos_pipeline_test
 ```
 
 默认不启动 UI、相机、PLC、Socket、同步线程，也不写数据库。只有显式传入 `--persist-db` 才会调用 Cosmos `ResultWriter`。
+业务判定为 NG 时默认返回退出码 `2`，技术执行错误返回其他非零码；仅在兼容旧脚本时显式传入
+`--allow-ng`，让业务 NG 返回 `0`。`--backend-config` 中的 `path`/`*_path` 模型字段会在推理前完成
+权重引用解析并检查文件是否存在，相对路径统一以 Cosmos 根目录为基准。
+现场验证建议每次使用新的 `--output-dir`；复用已有目录时，本次 `run_manifest.json` 会覆盖，但旧 case
+子目录不会自动删除。
 
 ## CAB-F GPU batch 自动标定
 

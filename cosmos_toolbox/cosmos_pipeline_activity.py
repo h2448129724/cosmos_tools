@@ -54,8 +54,7 @@ def build_pipeline_command(request: PipelineRequest, python_executable: str | No
         command.append("--dry-run")
     if request.persist_db:
         command.append("--persist-db")
-    if request.fail_on_ng:
-        command.append("--fail-on-ng")
+    command.append("--fail-on-ng" if request.fail_on_ng else "--allow-ng")
     return command
 
 
@@ -125,7 +124,8 @@ class CosmosPipelineActivity(QWidget):
         options.addWidget(self.dry_run_check)
         self.persist_db_check = QCheckBox("写入 Cosmos 数据库")
         options.addWidget(self.persist_db_check)
-        self.fail_on_ng_check = QCheckBox("NG 返回非零退出码")
+        self.fail_on_ng_check = QCheckBox("NG 返回非零退出码（默认）")
+        self.fail_on_ng_check.setChecked(True)
         options.addWidget(self.fail_on_ng_check)
         options.addStretch(1)
         config_layout.addLayout(options)
@@ -343,6 +343,8 @@ class CosmosPipelineActivity(QWidget):
         self._task_id = f"cosmos-pipeline-{uuid4().hex[:12]}"
         self._task_finished = False
         self._cancelling = False
+        self._stdout_buffer = ""
+        self._stderr_buffer = ""
         output_path = "" if request.dry_run else str(request.output_dir)
         self.runtime.task_center.start(
             self._task_id,
@@ -422,7 +424,15 @@ class CosmosPipelineActivity(QWidget):
             self._append_line(self._stdout_buffer, "stdout")
         if self._stderr_buffer:
             self._append_line(self._stderr_buffer, "stderr")
-        status = TaskStatus.STOPPED if self._cancelling else TaskStatus.SUCCESS if exit_code in {0, 2} else TaskStatus.FAILED
+        status = (
+            TaskStatus.STOPPED
+            if self._cancelling
+            else TaskStatus.SUCCESS
+            if exit_code == 0
+            else TaskStatus.BUSINESS_NG
+            if exit_code == 2
+            else TaskStatus.FAILED
+        )
         self._finish(status)
 
     def _finish(self, status: TaskStatus) -> None:
@@ -431,9 +441,13 @@ class CosmosPipelineActivity(QWidget):
         self._task_finished = True
         if self._task_id:
             self.runtime.task_center.finish(self._task_id, status)
-        self.status_label.setText(
-            {TaskStatus.SUCCESS: "完成", TaskStatus.FAILED: "失败", TaskStatus.STOPPED: "已停止"}.get(status, status.value)
-        )
+        status_text = {
+            TaskStatus.SUCCESS: "完成",
+            TaskStatus.BUSINESS_NG: "业务 NG",
+            TaskStatus.FAILED: "失败",
+            TaskStatus.STOPPED: "已停止",
+        }.get(status, status.value)
+        self.status_label.setText(status_text)
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         process = self._process

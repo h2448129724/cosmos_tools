@@ -104,20 +104,31 @@ def _detect_side(path_parts: tuple[Any, ...]) -> str:
     return "unknown"
 
 
-def _collect_roi_fields(node: Any, path_parts: tuple[Any, ...] = ()) -> list[RoiField]:
+def _collect_roi_fields(
+    node: Any,
+    path_parts: tuple[Any, ...] = (),
+    cab_f_config: bool | None = None,
+) -> list[RoiField]:
+    if cab_f_config is None:
+        inspection = node.get("inspection", {}) if isinstance(node, dict) else {}
+        cab_f_config = str(inspection.get("project", "")).upper() == "CAB-F"
     fields: list[RoiField] = []
     if isinstance(node, dict):
         for key, value in node.items():
             next_path = path_parts + (key,)
             key_str = str(key).lower()
-            if key_str in {"roi", "rois"} and (_is_rect_list(value) or _is_multi_rect_list(value)):
+            is_roi_key = key_str == "roi" if cab_f_config else key_str in {"roi", "rois"}
+            is_empty_multi_roi = cab_f_config and key_str == "roi" and isinstance(value, list) and not value
+            if is_roi_key and (
+                _is_rect_list(value) or _is_multi_rect_list(value) or is_empty_multi_roi
+            ):
                 side = _detect_side(next_path)
                 display = ".".join(str(part) for part in next_path)
-                fields.append(RoiField(next_path, display, side, _is_multi_rect_list(value)))
-            fields.extend(_collect_roi_fields(value, next_path))
+                fields.append(RoiField(next_path, display, side, _is_multi_rect_list(value) or is_empty_multi_roi))
+            fields.extend(_collect_roi_fields(value, next_path, cab_f_config))
     elif isinstance(node, list):
         for index, value in enumerate(node):
-            fields.extend(_collect_roi_fields(value, path_parts + (index,)))
+            fields.extend(_collect_roi_fields(value, path_parts + (index,), cab_f_config))
     return fields
 
 
@@ -607,6 +618,7 @@ class RoiConfigEditorPage(BaseToolPage):
     def _on_side_changed(self):
         side = str(self._side_combo.currentData() or "top")
         self._current_image_side = side
+        self._side_badge.setText(side.upper())
         self._refresh_field_list()
         self._load_current_image()
         if self._field_list.count() > 0:

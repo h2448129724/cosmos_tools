@@ -5,6 +5,8 @@ import math
 import os
 from pathlib import Path
 
+import cv2
+
 from .image_io import read_image, write_image
 from ..common.helpers import ensure_dir, get_image_files
 
@@ -75,6 +77,21 @@ def batch_tile_crop(
             if tw < tile_w or th < tile_h:
                 continue
             tile_img = img[y:y + th, x:x + tw]
+            if allow_overlap and (tile_img.shape[1] < tile_w or tile_img.shape[0] < tile_h):
+                # A tile cannot be shifted far enough when the source image itself is
+                # smaller than the requested size. Keep the source pixels unchanged
+                # at the top-left and pad the missing right/bottom area with black.
+                pad_right = tile_w - tile_img.shape[1]
+                pad_bottom = tile_h - tile_img.shape[0]
+                tile_img = cv2.copyMakeBorder(
+                    tile_img,
+                    0,
+                    pad_bottom,
+                    0,
+                    pad_right,
+                    borderType=cv2.BORDER_CONSTANT,
+                    value=0,
+                )
             out_name = f"{stem}_tile_{row}_{col}{ext}"
             write_image(os.path.join(output_dir, out_name), tile_img)
             total += 1

@@ -355,7 +355,7 @@ class ToolboxWindow(QMainWindow):
         self.inspector.apply_artifacts(self.project_session.recent())
 
     def _on_task_finished(self, task) -> None:
-        if task.status != TaskStatus.SUCCESS or not task.output_path:
+        if task.status not in {TaskStatus.SUCCESS, TaskStatus.BUSINESS_NG} or not task.output_path:
             return
         if not Path(task.output_path).exists():
             return

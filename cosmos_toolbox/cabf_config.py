@@ -113,13 +113,17 @@ def collect_roi_fields(node: Any, path_parts: tuple[Any, ...] = ()) -> list[RoiF
     if isinstance(node, dict):
         for key, value in node.items():
             next_path = path_parts + (key,)
-            if str(key).lower() in {"roi", "rois"} and (_is_rect_list(value) or _is_multi_rect_list(value)):
+            key_name = str(key).lower()
+            is_empty_multi_roi = key_name == "roi" and isinstance(value, list) and not value
+            if key_name == "roi" and (
+                _is_rect_list(value) or _is_multi_rect_list(value) or is_empty_multi_roi
+            ):
                 fields.append(
                     RoiField(
                         path_parts=next_path,
                         display_name=".".join(str(part) for part in next_path),
                         side=_detect_side(next_path),
-                        is_multi=_is_multi_rect_list(value),
+                        is_multi=_is_multi_rect_list(value) or is_empty_multi_roi,
                     )
                 )
             fields.extend(collect_roi_fields(value, next_path))

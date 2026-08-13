@@ -52,7 +52,7 @@ class PipelineRequest:
     engine: str = "auto"
     dry_run: bool = False
     persist_db: bool = False
-    fail_on_ng: bool = False
+    fail_on_ng: bool = True
     save_annotated_images: bool = True
     onnx_session_report: Path | None = None
 
@@ -240,6 +240,35 @@ def _configure_cosmos(request: PipelineRequest, descriptor: PipelineDescriptor) 
     if not isinstance(subtree, dict):
         raise ValueError(f"后端配置缺少项目节点：{descriptor.backend_key}")
     config_loader.reload_backend_config({descriptor.backend_key: subtree}, project=descriptor.backend_key)
+    resolved_backend = config_loader.get_backend_config().get(descriptor.backend_key)
+    if not isinstance(resolved_backend, dict):
+        raise ValueError(f"后端配置未加载项目节点：{descriptor.backend_key}")
+    _validate_backend_model_paths(resolved_backend)
+
+
+def _validate_backend_model_paths(subtree: dict[str, Any]) -> None:
+    """Fail before first inference when model references remain unresolved."""
+
+    def walk(node: Any, location: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                child = f"{location}.{key}" if location else str(key)
+                is_path_field = isinstance(key, str) and (key == "path" or key.endswith("_path"))
+                if is_path_field and isinstance(value, str):
+                    if value.startswith("@"):
+                        raise ValueError(f"后端模型路径未解析：{child}={value}")
+                    path = Path(value).expanduser()
+                    if not path.is_absolute():
+                        path = COSMOS_ROOT / path
+                    if not path.is_file():
+                        raise FileNotFoundError(f"后端模型文件不存在：{child}={path}")
+                else:
+                    walk(value, child)
+        elif isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                walk(value, f"{location}[{index}]")
+
+    walk(subtree, "")
 
 
 def _engine(request: PipelineRequest, descriptor: PipelineDescriptor) -> str:
@@ -288,11 +317,14 @@ def _detect_service(descriptor: PipelineDescriptor, images: list[Any], index: in
     raise ValueError(f"{descriptor.project} 没有生产算法服务入口，请使用 local/auto")
 
 
-def _evaluate_and_draw(descriptor: PipelineDescriptor, result: dict[str, Any], image: Any, index: int):
-    import numpy as np
-
-    from algo import cab_drawing, cab_f_drawing, dab_drawing, os_dab_drawing
-    from algo.utils import adjust
+def _evaluate_and_draw(
+    descriptor: PipelineDescriptor,
+    result: dict[str, Any],
+    image: Any,
+    index: int,
+    *,
+    draw_output: bool = True,
+):
     from biz.checker import CABFChecker, Checker, OSDABChecker
     from biz.config_loader import config
 
@@ -328,6 +360,14 @@ def _evaluate_and_draw(descriptor: PipelineDescriptor, result: dict[str, Any], i
     for path, error in _collect_failed_results(result):
         passed = False
         messages.append(f"{path} 执行失败：{error}")
+
+    if not draw_output:
+        return passed, checks, messages, None
+
+    import numpy as np
+
+    from algo import cab_drawing, cab_f_drawing, dab_drawing, os_dab_drawing
+    from algo.utils import adjust
 
     if project == "CAB-F":
         drawn = cab_f_drawing.draw(image, result, config.inspection.get("conf") or {}, checks)
@@ -387,7 +427,13 @@ def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: Pipeline
         )
         if not isinstance(result, dict):
             raise RuntimeError(f"{slot.name} 检测未返回结果对象")
-        passed, checks, messages, annotated = _evaluate_and_draw(descriptor, result, image, index)
+        passed, checks, messages, annotated = _evaluate_and_draw(
+            descriptor,
+            result,
+            image,
+            index,
+            draw_output=request.save_annotated_images,
+        )
         overall = overall and passed
         face_conf = (config.inspection.get("conf") or {}).get(slot.name, config.inspection.get("conf") or {})
         extracted, update_required = Extractor.extract_product_id(result, face_conf)
@@ -418,6 +464,11 @@ def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: Pipeline
             "annotated_image": str(annotated_path) if request.save_annotated_images else None,
         })
         _event("business_result", case=case.case_id, slot=slot.name, outcome="OK" if passed else "NG")
+        # Full-size line-scan images are hundreds of MiB each.  Release the
+        # completed slot before the next slot image is loaded; otherwise the
+        # previous source/result/annotation stay live while the next RHS is
+        # evaluated and can push a two-face CAB-F run over its memory limit.
+        del images, image, result, annotated
 
     dto.update_result(product_id, overall, True)
     persisted = False
@@ -514,7 +565,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", choices=("auto", "local", "service"), default="auto")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--persist-db", action="store_true")
-    parser.add_argument("--fail-on-ng", action="store_true")
+    ng_group = parser.add_mutually_exclusive_group()
+    ng_group.add_argument("--fail-on-ng", dest="fail_on_ng", action="store_true", help="业务 NG 返回退出码 2（默认）")
+    ng_group.add_argument(
+        "--allow-ng",
+        dest="fail_on_ng",
+        action="store_false",
+        help="兼容模式：业务 NG 仍返回退出码 0",
+    )
+    parser.set_defaults(fail_on_ng=True)
     parser.add_argument("--skip-annotated-images", action="store_true")
     parser.add_argument("--onnx-session-report", type=Path)
     return parser
