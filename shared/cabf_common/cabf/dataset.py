@@ -4,10 +4,15 @@ import shutil
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .constants import MASTER_SCHEMA_VERSION
+from .dataset_core import (
+    SampleAssessment,
+    SampleFacts,
+    aggregate_validation_report,
+    assess_sample,
+    decide_model_a_export,
+    decide_model_b_export,
+)
 from .io import iter_image_files, iter_json_files, read_image_size, read_json, write_json
-from .normalize import normalize_master_annotation
-from .schema import master_to_labelme
 
 
 def collect_stem_maps(image_dir: str | Path, annotation_dir: str | Path) -> tuple[dict[str, Path], dict[str, Path]]:
@@ -16,153 +21,53 @@ def collect_stem_maps(image_dir: str | Path, annotation_dir: str | Path) -> tupl
     return image_map, json_map
 
 
-def _inspect_master_sample(stem: str, image_path: Path, json_path: Path | None) -> tuple[dict, dict | None]:
+def _inspect_master_sample(stem: str, image_path: Path, json_path: Path | None) -> SampleAssessment:
     if json_path is None or not json_path.exists():
-        return (
-            {
-                "sample_id": stem,
-                "image_path": str(image_path),
-                "json_path": str(json_path) if json_path else "",
-                "point_count": 0,
-                "edge_count": 0,
-                "errors": ["缺少标注文件"],
-                "warnings": [],
-            },
-            None,
+        return assess_sample(
+            SampleFacts(stem, str(image_path), str(json_path) if json_path else ""),
+            annotation_missing=True,
         )
 
     try:
         raw = read_json(json_path)
     except Exception as exc:
-        return (
-            {
-                "sample_id": stem,
-                "image_path": str(image_path),
-                "json_path": str(json_path),
-                "point_count": 0,
-                "edge_count": 0,
-                "errors": [f"JSON 读取失败: {exc}"],
-                "warnings": [],
-            },
-            None,
+        return assess_sample(
+            SampleFacts(stem, str(image_path), str(json_path)),
+            annotation_read_error=exc,
         )
 
     try:
         image_w, image_h = read_image_size(image_path)
     except Exception as exc:
-        return (
-            {
-                "sample_id": stem,
-                "image_path": str(image_path),
-                "json_path": str(json_path),
-                "point_count": 0,
-                "edge_count": 0,
-                "errors": [f"图片读取失败: {exc}"],
-                "warnings": [],
-            },
-            None,
+        return assess_sample(
+            SampleFacts(stem, str(image_path), str(json_path)),
+            raw_annotation=raw,
+            image_read_error=exc,
         )
 
-    issues: list[str] = []
-    warnings: list[str] = []
-    normalized, normalize_issues = normalize_master_annotation(raw, sample_id=stem, image_path=image_path.name)
-    issues.extend(normalize_issues)
-
-    ann_w = int(normalized.get("image_size", {}).get("width", 0) or 0)
-    ann_h = int(normalized.get("image_size", {}).get("height", 0) or 0)
-    if ann_w != image_w or ann_h != image_h:
-        warnings.append(f"image_size 与实际图片不一致: 标注=({ann_w},{ann_h}) 实际=({image_w},{image_h})")
-
-    points = normalized["points"]
-    edges = normalized["edges"]
-    degree = Counter()
-    for edge in edges:
-        degree[int(edge["src"])] += 1
-        degree[int(edge["dst"])] += 1
-    overflow_points = sorted([point_id for point_id, deg in degree.items() if deg > 2])
-    if overflow_points:
-        warnings.append(f"{len(overflow_points)} 个点的度数超过 2: {overflow_points[:10]}")
-
-    return (
-        {
-            "sample_id": stem,
-            "image_path": str(image_path),
-            "json_path": str(json_path),
-            "point_count": len(points),
-            "edge_count": len(edges),
-            "errors": issues,
-            "warnings": warnings,
-        },
-        normalized,
+    return assess_sample(
+        SampleFacts(stem, str(image_path), str(json_path)),
+        raw_annotation=raw,
+        actual_size=(image_w, image_h),
     )
 
 
 def validate_master_dataset(image_dir: str | Path, annotation_dir: str | Path) -> dict:
     image_map, json_map = collect_stem_maps(image_dir, annotation_dir)
-    missing_annotations = sorted(set(image_map) - set(json_map))
-    orphan_annotations = sorted(set(json_map) - set(image_map))
-    sample_reports = []
-    stats = Counter()
-    point_count_hist = Counter()
-    edge_count_hist = Counter()
+    assessments: list[SampleAssessment] = []
 
     for stem in sorted(set(image_map) & set(json_map)):
         image_path = image_map[stem]
         json_path = json_map[stem]
-        sample_report, _ = _inspect_master_sample(stem, image_path, json_path)
-        if any(msg.startswith("JSON 读取失败:") for msg in sample_report.get("errors", [])):
-            stats["invalid_json"] += 1
-        if any(msg.startswith("图片读取失败:") for msg in sample_report.get("errors", [])):
-            stats["invalid_image"] += 1
-        if sample_report.get("warnings") and any("度数超过 2" in msg for msg in sample_report["warnings"]):
-            stats["degree_overflow_samples"] += 1
+        assessments.append(_inspect_master_sample(stem, image_path, json_path))
 
-        point_count = int(sample_report.get("point_count", 0) or 0)
-        edge_count = int(sample_report.get("edge_count", 0) or 0)
-        point_count_hist[min(point_count, 20)] += 1
-        edge_count_hist[min(edge_count, 20)] += 1
-        if point_count == 0:
-            stats["zero_point_samples"] += 1
-        if point_count == 1:
-            stats["one_point_samples"] += 1
-        if edge_count == 0:
-            stats["zero_edge_samples"] += 1
-        if edge_count > 0:
-            stats["samples_with_edges"] += 1
-        if point_count > 0:
-            stats["samples_with_points"] += 1
-
-        sample_reports.append(sample_report)
-
-    stats["num_images"] = len(image_map)
-    stats["num_annotations"] = len(json_map)
-    stats["paired_samples"] = len(set(image_map) & set(json_map))
-    stats["missing_annotations"] = len(missing_annotations)
-    stats["orphan_annotations"] = len(orphan_annotations)
-    stats["samples_with_errors"] = sum(1 for item in sample_reports if item.get("errors"))
-    stats["samples_with_warnings"] = sum(1 for item in sample_reports if item.get("warnings"))
-    zero_point_samples = sorted(item["sample_id"] for item in sample_reports if item.get("point_count") == 0)
-    one_point_samples = sorted(item["sample_id"] for item in sample_reports if item.get("point_count") == 1)
-    zero_edge_samples = sorted(item["sample_id"] for item in sample_reports if item.get("edge_count") == 0)
-    error_samples = sorted(item["sample_id"] for item in sample_reports if item.get("errors"))
-    warning_samples = sorted(item["sample_id"] for item in sample_reports if item.get("warnings"))
-
-    return {
-        "schema_version": MASTER_SCHEMA_VERSION,
-        "image_dir": str(image_dir),
-        "annotation_dir": str(annotation_dir),
-        "summary": dict(stats),
-        "missing_annotations": missing_annotations,
-        "orphan_annotations": orphan_annotations,
-        "zero_point_samples": zero_point_samples,
-        "one_point_samples": one_point_samples,
-        "zero_edge_samples": zero_edge_samples,
-        "error_samples": error_samples,
-        "warning_samples": warning_samples,
-        "point_count_histogram": dict(point_count_hist),
-        "edge_count_histogram": dict(edge_count_hist),
-        "samples": sample_reports,
-    }
+    return aggregate_validation_report(
+        image_dir=str(image_dir),
+        annotation_dir=str(annotation_dir),
+        image_sample_ids=image_map,
+        annotation_sample_ids=json_map,
+        assessments=assessments,
+    )
 
 
 def _copy_image(src: Path, dst: Path) -> None:
@@ -194,19 +99,19 @@ def export_master_to_model_a(
 
     for stem, image_path in sorted(image_map.items()):
         json_path = json_map.get(stem)
-        sample_report, master = _inspect_master_sample(stem, image_path, json_path)
-        if sample_report.get("errors") or sample_report.get("point_count", 0) == 0:
+        assessment = _inspect_master_sample(stem, image_path, json_path)
+        decision = decide_model_a_export(assessment, include_empty=include_empty)
+        if decision.action == "ERROR":
             _route_sample_to_error(image_path, json_path, error_dir)
             report["samples_routed_to_error"] += 1
             continue
-        assert master is not None
-        if not include_empty and not master.get("points"):
+        if decision.action == "SKIP":
             report["skipped_empty_annotations"] += 1
             continue
+        assert decision.payload is not None
         _copy_image(image_path, output_image_dir / image_path.name)
         report["images_exported"] += 1
-        labelme = master_to_labelme(master)
-        write_json(output_annotation_dir / f"{stem}.json", labelme)
+        write_json(output_annotation_dir / f"{stem}.json", decision.payload)
         report["annotations_exported"] += 1
 
     result = dict(report)
@@ -234,18 +139,19 @@ def export_master_to_model_b(
 
     for stem, image_path in sorted(image_map.items()):
         json_path = json_map.get(stem)
-        sample_report, master = _inspect_master_sample(stem, image_path, json_path)
-        if sample_report.get("errors") or sample_report.get("point_count", 0) <= 1 or sample_report.get("edge_count", 0) == 0:
+        assessment = _inspect_master_sample(stem, image_path, json_path)
+        decision = decide_model_b_export(assessment, include_empty=include_empty)
+        if decision.action == "ERROR":
             _route_sample_to_error(image_path, json_path, error_dir)
             report["samples_routed_to_error"] += 1
             continue
-        assert master is not None
-        if not include_empty and not master.get("points"):
+        if decision.action == "SKIP":
             report["skipped_empty_annotations"] += 1
             continue
+        assert decision.payload is not None
         _copy_image(image_path, output_image_dir / image_path.name)
         report["images_exported"] += 1
-        write_json(output_annotation_dir / f"{stem}.json", master)
+        write_json(output_annotation_dir / f"{stem}.json", decision.payload)
         report["annotations_exported"] += 1
 
     result = dict(report)

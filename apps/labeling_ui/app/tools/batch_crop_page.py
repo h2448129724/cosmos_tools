@@ -5,13 +5,16 @@ from __future__ import annotations
 import os
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QMessageBox,
     QPushButton,
+    QSpinBox,
+    QSplitter,
+    QSizePolicy,
     QVBoxLayout,
 )
 from PySide6.QtCore import Qt
@@ -19,7 +22,8 @@ from PySide6.QtCore import Qt
 from apps.data_tools.processing.image_io import read_image
 from apps.data_tools.processing.batch_crop import batch_crop, crop_single_image
 from ..preview_widget import ZoomableLabel
-from .base import BaseToolPage, FuncWorker, make_card, make_log_box, make_log_card, make_page_header, set_primary
+from cosmos_toolbox.ui.primitives import ActionBar, PathField, SectionSurface, set_ui_role
+from .base import BaseToolPage, make_log_box, make_log_card, make_page_header, set_primary
 
 
 class BatchCropPage(BaseToolPage):
@@ -45,156 +49,176 @@ class BatchCropPage(BaseToolPage):
 
         lay.addWidget(make_page_header("批量裁剪", "框选 ROI 后验证单张，再执行整批输出。"))
 
-        settings_card = make_card()
-        settings_lay = QVBoxLayout(settings_card)
-        settings_lay.setContentsMargins(18, 16, 18, 16)
-        settings_lay.setSpacing(12)
-
-        in_row = QHBoxLayout()
-        in_row.setSpacing(10)
-        in_label = QLabel("图片目录")
-        in_label.setFixedWidth(84)
-        in_row.addWidget(in_label)
-        self._in_entry = QLineEdit()
-        in_row.addWidget(self._in_entry, 1)
-        b_in = QPushButton("浏览")
-        b_in.setFixedWidth(72)
-        b_in.clicked.connect(self._pick_input)
-        in_row.addWidget(b_in)
+        settings_card = SectionSurface("输入与输出", "选择图片目录和输出位置，然后加载图片。")
+        settings_lay = settings_card.body_layout
+        input_field = PathField("图片目录", placeholder="选择包含图片的目录")
+        input_field.browse_requested.connect(self._pick_input)
+        self._in_entry = input_field.line_edit
+        output_field = PathField("输出目录", placeholder="可选；留空则使用输入目录")
+        output_field.browse_requested.connect(lambda: self._pick_dir(self._out_entry))
+        self._out_entry = output_field.line_edit
+        settings_lay.addWidget(input_field)
+        settings_lay.addWidget(output_field)
+        settings_actions = ActionBar()
         b_load = QPushButton("加载目录")
-        b_load.setFixedWidth(92)
+        b_load.setAccessibleName("加载图片目录")
         b_load.clicked.connect(self._load_first)
         set_primary(b_load)
-        in_row.addWidget(b_load)
-        settings_lay.addLayout(in_row)
-
-        out_row = QHBoxLayout()
-        out_row.setSpacing(10)
-        out_label = QLabel("输出目录")
-        out_label.setFixedWidth(84)
-        out_row.addWidget(out_label)
-        self._out_entry = QLineEdit()
-        out_row.addWidget(self._out_entry, 1)
-        b_out = QPushButton("浏览")
-        b_out.setFixedWidth(72)
-        b_out.clicked.connect(lambda: self._pick_dir(self._out_entry))
-        out_row.addWidget(b_out)
-        settings_lay.addLayout(out_row)
+        settings_actions.add_widget(b_load)
+        settings_lay.addWidget(settings_actions)
         lay.addWidget(settings_card)
 
-        main_row = QHBoxLayout()
-        main_row.setSpacing(12)
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setChildrenCollapsible(False)
+        main_splitter.setHandleWidth(3)
 
         # left: preview-first workspace
-        left = make_card()
-        left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(18, 18, 18, 18)
+        left = SectionSurface("预览与 ROI", "在预览中框选 ROI；已有 ROI 可在框内拖动。")
+        left_lay = left.body_layout
+        # Keep the canvas an even width at the desktop breakpoint so image
+        # coordinate rounding remains stable for ROI placement.
+        left_lay.setContentsMargins(17, 18, 18, 18)
         left_lay.setSpacing(10)
 
-        info_row = QHBoxLayout()
         self._current_name = QLabel("当前图片：未加载")
-        self._current_name.setStyleSheet("color:#0f172a;font-size:15px;font-weight:700;")
+        set_ui_role(self._current_name, "sectionTitle")
+        self._current_name.setAccessibleName("当前图片")
         self._current_name.setWordWrap(True)
-        info_row.addWidget(self._current_name, 1)
         self._nav_hint = QLabel("A / D 快速切图")
-        self._nav_hint.setStyleSheet("color:#64748b;")
-        info_row.addWidget(self._nav_hint)
-        left_lay.addLayout(info_row)
+        set_ui_role(self._nav_hint, "muted")
+        left_lay.addWidget(self._current_name)
+        left_lay.addWidget(self._nav_hint)
 
         self._preview_meta = QLabel("加载图片目录后可开始框选 ROI。")
-        self._preview_meta.setStyleSheet("color:#64748b;")
+        set_ui_role(self._preview_meta, "muted")
+        self._preview_meta.setAccessibleName("预览信息")
         left_lay.addWidget(self._preview_meta)
 
         self._preview = ZoomableLabel()
-        self._preview.setMinimumHeight(420)
+        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._preview.setAccessibleName("图片预览与 ROI 画布")
         self._preview.rectSelected.connect(self._on_rect_selected)
         self._preview.rectsChanged.connect(self._refresh_roi_list)
         self._preview.rectSelectionChanged.connect(self._sync_selected_roi_row)
         left_lay.addWidget(self._preview, 1)
 
-        nav_btns = QHBoxLayout()
-        nav_btns.setSpacing(8)
+        nav_btns = ActionBar()
         b_prev = QPushButton("上一张(A)")
+        b_prev.setAccessibleName("上一张图片")
         b_prev.clicked.connect(lambda: self._show_offset(-1))
         b_next = QPushButton("下一张(D)")
+        b_next.setAccessibleName("下一张图片")
         b_next.clicked.connect(lambda: self._show_offset(+1))
-        nav_btns.addWidget(b_prev)
-        nav_btns.addWidget(b_next)
-        nav_btns.addStretch(1)
-        left_lay.addLayout(nav_btns)
+        nav_btns.add_widget(b_prev)
+        nav_btns.add_widget(b_next)
+        left_lay.addWidget(nav_btns)
 
-        roi_btns = QHBoxLayout()
-        roi_btns.setSpacing(8)
+        roi_btns = ActionBar()
         b_start = QPushButton("开始框选")
+        b_start.setAccessibleName("开始框选 ROI")
         set_primary(b_start)
         b_start.clicked.connect(self._start_select)
         b_undo = QPushButton("撤销上一个")
+        b_undo.setAccessibleName("撤销上一个 ROI")
         b_undo.clicked.connect(self._undo_rect)
         b_clear = QPushButton("清除所有")
+        b_clear.setAccessibleName("清除所有 ROI")
         b_clear.clicked.connect(self._clear_rects)
-        roi_btns.addWidget(b_start)
-        roi_btns.addWidget(b_undo)
-        roi_btns.addWidget(b_clear)
-        roi_btns.addStretch(1)
-        left_lay.addLayout(roi_btns)
+        roi_btns.add_widget(b_start)
+        roi_btns.add_widget(b_undo)
+        roi_btns.add_widget(b_clear)
+        left_lay.addWidget(roi_btns)
+
+        fixed_size_row = ActionBar()
+        self._fixed_size_check = QCheckBox("固定尺寸")
+        self._fixed_size_check.setAccessibleName("固定 ROI 尺寸")
+        self._fixed_size_check.setToolTip("开启后，新建 ROI 始终使用指定宽高；已有 ROI 仍可在框内拖动。")
+        self._fixed_width = QSpinBox()
+        self._fixed_height = QSpinBox()
+        for box in (self._fixed_width, self._fixed_height):
+            box.setRange(1, 1_000_000)
+            box.setValue(256)
+        self._fixed_width.setAccessibleName("固定 ROI 宽度")
+        self._fixed_height.setAccessibleName("固定 ROI 高度")
+        fixed_size_row.add_widget(self._fixed_size_check)
+        width_label = QLabel("宽")
+        height_label = QLabel("高")
+        width_label.setAccessibleName("固定 ROI 宽度")
+        height_label.setAccessibleName("固定 ROI 高度")
+        fixed_size_row.add_widget(width_label)
+        fixed_size_row.add_widget(self._fixed_width)
+        fixed_size_row.add_widget(height_label)
+        fixed_size_row.add_widget(self._fixed_height)
+        move_hint = QLabel("框内拖动可移动 ROI")
+        set_ui_role(move_hint, "muted")
+        fixed_size_row.add_widget(move_hint)
+        left_lay.addWidget(fixed_size_row)
+        self._fixed_size_check.toggled.connect(self._sync_fixed_size)
+        self._fixed_width.valueChanged.connect(self._sync_fixed_size)
+        self._fixed_height.valueChanged.connect(self._sync_fixed_size)
 
         self._roi_list = QListWidget()
+        self._roi_list.setAccessibleName("ROI 列表")
         self._roi_list.setMaximumHeight(96)
         self._roi_list.currentRowChanged.connect(self._preview.set_selected_rect_index)
         left_lay.addWidget(self._roi_list)
 
-        main_row.addWidget(left, 1)
+        main_splitter.addWidget(left)
 
         # right: status + actions + list
-        right = make_card()
-        right_lay = QVBoxLayout(right)
+        right = SectionSurface("当前任务", "任务状态、文件列表和执行操作。")
+        right_lay = right.body_layout
         right_lay.setContentsMargins(16, 16, 16, 16)
         right_lay.setSpacing(10)
-        right.setFixedWidth(320)
-
-        status_title = QLabel("当前任务")
-        status_title.setStyleSheet("color:#111827;font-size:15px;font-weight:700;")
-        right_lay.addWidget(status_title)
+        right.setMinimumWidth(250)
+        right.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
         self._task_current = QLabel("当前图片：0 / 0")
         self._task_size = QLabel("图片尺寸：-")
         self._task_roi = QLabel("ROI 数量：0")
         self._task_state = QLabel("状态：待加载目录")
         for label in (self._task_current, self._task_size, self._task_roi, self._task_state):
-            label.setStyleSheet("color:#475569;")
+            set_ui_role(label, "muted")
             right_lay.addWidget(label)
 
         self._summary = QLabel("等待加载图片目录。")
         self._summary.setWordWrap(True)
-        self._summary.setStyleSheet("color:#64748b;")
+        set_ui_role(self._summary, "muted")
+        self._summary.setAccessibleName("裁剪摘要")
         right_lay.addWidget(self._summary)
 
-        action_row = QHBoxLayout()
-        action_row.setSpacing(8)
+        action_row = ActionBar()
         b_single = QPushButton("裁剪当前图片")
+        b_single.setAccessibleName("裁剪当前图片")
         b_single.clicked.connect(self._run_single)
-        action_row.addWidget(b_single)
-        right_lay.addLayout(action_row)
+        action_row.add_widget(b_single)
+        right_lay.addWidget(action_row)
 
         b_run = QPushButton("执行批量裁剪")
+        b_run.setAccessibleName("执行批量裁剪")
         set_primary(b_run)
         b_run.clicked.connect(self._run)
         right_lay.addWidget(b_run)
 
         self._file_list_toggle = QPushButton("图片列表 0/0 v")
+        self._file_list_toggle.setAccessibleName("展开或收起图片列表")
         self._file_list_toggle.setCheckable(True)
         self._file_list_toggle.setChecked(True)
         self._file_list_toggle.clicked.connect(self._toggle_file_list)
         right_lay.addWidget(self._file_list_toggle)
 
         self._file_list = QListWidget()
+        self._file_list.setAccessibleName("图片文件列表")
         self._file_list.setMaximumHeight(156)
         self._file_list.currentRowChanged.connect(self._show_file_at)
         right_lay.addWidget(self._file_list)
         right_lay.addStretch(1)
 
-        main_row.addWidget(right, 0)
-        lay.addLayout(main_row, 1)
+        main_splitter.addWidget(right)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([760, 300])
+        lay.addWidget(main_splitter, 1)
 
         self._log = make_log_box("运行日志...")
         lay.addWidget(make_log_card(self._log))
@@ -239,6 +263,8 @@ class BatchCropPage(BaseToolPage):
             return
         self._current_file_index = index
         self._ref_h, self._ref_w = img.shape[:2]
+        self._fixed_width.setMaximum(max(1, self._ref_w))
+        self._fixed_height.setMaximum(max(1, self._ref_h))
         from ..preview_widget import cv2_to_qpixmap
 
         self._preview.set_pixmap(cv2_to_qpixmap(img), preserve_rects=True)
@@ -268,7 +294,16 @@ class BatchCropPage(BaseToolPage):
             self._show_file_at(next_index)
 
     def _start_select(self):
+        self._sync_fixed_size()
         self._preview.rect_select_mode = True
+
+    def _sync_fixed_size(self, *_args):
+        size = (
+            (self._fixed_width.value(), self._fixed_height.value())
+            if self._fixed_size_check.isChecked()
+            else None
+        )
+        self._preview.set_fixed_rect_size(size)
 
     def _on_rect_selected(self, x1, y1, x2, y2):
         self._refresh_roi_list()
@@ -320,6 +355,8 @@ class BatchCropPage(BaseToolPage):
         return self._preview.get_roi_rects()
 
     def _run(self):
+        if self.worker_running():
+            return
         input_dir = self._in_entry.text().strip()
         output_dir = self._out_entry.text().strip()
         rects = self._get_rects()
@@ -339,9 +376,15 @@ class BatchCropPage(BaseToolPage):
         self._log.appendPlainText(f"裁剪 {len(rects)} 个ROI...")
         self._summary.setText(f"开始处理：{len(rects)} 个 ROI，将按参考尺寸 {self._ref_w} x {self._ref_h} 映射。")
         self._update_task_panel("状态：批量处理中")
-        self._worker = FuncWorker(batch_crop, input_dir, rects, self._ref_w, self._ref_h, output_dir)
-        self._worker.finished.connect(self._on_done)
-        self._worker.start()
+        self.run_background(
+            batch_crop,
+            input_dir,
+            rects,
+            self._ref_w,
+            self._ref_h,
+            output_dir,
+            on_result=self._on_done,
+        )
 
     def _run_single(self):
         output_dir = self._out_entry.text().strip()

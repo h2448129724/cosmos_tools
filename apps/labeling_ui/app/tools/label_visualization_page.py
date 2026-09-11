@@ -8,14 +8,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -26,7 +25,8 @@ from cabf import IMAGE_SUFFIXES, read_image_bgr
 from ..annotation.adapters.cabf import CabfAnnotationAdapter
 from ..annotation.canvas import AnnotationCanvas
 from ..annotation.layer_panel import LayerVisibilityPanel
-from .base import BaseToolPage, make_card, make_page_header, set_primary
+from .base import BaseToolPage, set_primary
+from cosmos_toolbox.ui import ActionBar, PageHeader, PathField, SectionSurface, StatusBanner
 
 
 @dataclass(frozen=True)
@@ -62,11 +62,12 @@ class LabelVisualizationPage(BaseToolPage):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        self.setProperty("ownsPageHeader", True)
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        root.addWidget(make_page_header("标签可视化", "选择图片目录和标签目录，按图层查看点、线、ROI 和多边形。", "通用工具"))
+        root.addWidget(PageHeader("标签可视化", "选择图片目录和标签目录，按图层查看点、线、ROI 和多边形。", "通用工具"))
 
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter, 1)
@@ -76,52 +77,58 @@ class LabelVisualizationPage(BaseToolPage):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
 
-        form_card = make_card()
-        form_layout = QVBoxLayout(form_card)
-        form_layout.setContentsMargins(14, 12, 14, 12)
-        form_layout.setSpacing(8)
-
-        self.edit_image_dir, image_row = self._path_row("图片目录")
-        self.edit_label_dir, label_row = self._path_row("标签目录")
-        form_layout.addLayout(image_row)
-        form_layout.addLayout(label_row)
+        form_card = SectionSurface("数据源", "支持图片目录与同名 CAB-F 标签目录。")
+        form_layout = form_card.body_layout
+        self._image_path_field = PathField("图片目录", browse_text="浏览")
+        self._label_path_field = PathField("标签目录", browse_text="浏览")
+        self.edit_image_dir = self._image_path_field.line_edit
+        self.edit_label_dir = self._label_path_field.line_edit
+        self.btn_choose_image = self._image_path_field.browse_button
+        self.btn_choose_label = self._label_path_field.browse_button
+        form_layout.addWidget(self._image_path_field)
+        form_layout.addWidget(self._label_path_field)
 
         format_row = QHBoxLayout()
         format_label = QLabel("标注格式")
-        format_label.setFixedWidth(72)
+        format_label.setMinimumWidth(72)
         self.combo_format = QComboBox()
+        self.combo_format.setAccessibleName("标注格式")
+        self.combo_format.setToolTip("选择标注格式；当前支持 CAB-F")
         self.combo_format.addItem("自动识别 / CAB-F", "cabf")
         format_row.addWidget(format_label)
         format_row.addWidget(self.combo_format, 1)
         form_layout.addLayout(format_row)
 
-        button_row = QHBoxLayout()
-        self.btn_choose_image = QPushButton("选择图片")
-        self.btn_choose_label = QPushButton("选择标签")
+        button_row = ActionBar()
+        button_row.setAccessibleName("可视化加载操作")
         self.btn_load = set_primary(QPushButton("加载"))
-        button_row.addWidget(self.btn_choose_image)
-        button_row.addWidget(self.btn_choose_label)
-        button_row.addWidget(self.btn_load)
-        form_layout.addLayout(button_row)
+        self.btn_load.setAccessibleName("加载可视化样本")
+        self.btn_load.setToolTip("按当前路径加载图片与标签")
+        button_row.add_widget(self.btn_choose_image)
+        button_row.add_widget(self.btn_choose_label)
+        button_row.add_widget(self.btn_load)
+        form_layout.addWidget(button_row)
         left_layout.addWidget(form_card)
 
         self.file_list = QListWidget()
-        self.file_list.setMinimumWidth(260)
+        self.file_list.setAccessibleName("可视化样本列表")
+        self.file_list.setToolTip("选择图片以查看标注图层")
+        self.file_list.setMinimumWidth(220)
+        self.file_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         left_layout.addWidget(self.file_list, 1)
 
-        self.status_label = QLabel("请选择图片目录和标签目录。")
+        self.status_banner = StatusBanner("请选择图片目录和标签目录。")
+        self.status_label = self.status_banner.label
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color:#475569;font-size:12px;")
-        left_layout.addWidget(self.status_label)
+        left_layout.addWidget(self.status_banner)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        layer_card = QFrame()
-        layer_layout = QVBoxLayout(layer_card)
-        layer_layout.setContentsMargins(0, 0, 0, 0)
+        layer_card = SectionSurface("图层")
+        layer_layout = layer_card.body_layout
         self.layer_panel = LayerVisibilityPanel()
         layer_layout.addWidget(self.layer_panel)
         right_layout.addWidget(layer_card)
@@ -138,15 +145,6 @@ class LabelVisualizationPage(BaseToolPage):
         self.btn_choose_label.clicked.connect(self.choose_label_dir)
         self.btn_load.clicked.connect(self.load_from_entries)
         self.file_list.currentRowChanged.connect(self.show_item)
-
-    def _path_row(self, label: str) -> tuple[QLineEdit, QHBoxLayout]:
-        row = QHBoxLayout()
-        lbl = QLabel(label)
-        lbl.setFixedWidth(72)
-        edit = QLineEdit()
-        row.addWidget(lbl)
-        row.addWidget(edit, 1)
-        return edit, row
 
     def choose_image_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择图片目录", self.edit_image_dir.text().strip())

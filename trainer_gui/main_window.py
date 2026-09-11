@@ -48,7 +48,7 @@ from .widgets.run_status_panel import RunStatusPanel
 from .widgets.yolo_dataset_panel import YoloDatasetPanel
 
 
-class MainWindow(QMainWindow):
+class TrainingWorkspacePage(QWidget):
     STATUS_META = {
         "idle": ("未开始", "#94a3b8", "#e2e8f0"),
         "running": ("运行中", "#2563eb", "#dbeafe"),
@@ -63,7 +63,6 @@ class MainWindow(QMainWindow):
         self.project_root = Path(project_root).resolve()
         self.setWindowTitle("训练管理工作台")
         self.setMinimumSize(980, 640)
-        self._resize_to_available_screen()
         self.setStyleSheet(build_app_stylesheet())
 
         self.settings_manager = SettingsManager(project_root)
@@ -89,7 +88,6 @@ class MainWindow(QMainWindow):
         self._workspace_router = None
         self._workspace_key = "training"
         self._embedded_mode = False
-
         self._build_ui()
         self._connect_signals()
         self._load_features()
@@ -99,21 +97,6 @@ class MainWindow(QMainWindow):
         self._apply_status_record(None)
         self._update_log_buttons()
         self._update_status_action_buttons()
-
-    def _resize_to_available_screen(self) -> None:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            self.resize(1360, 820)
-            return
-
-        available = screen.availableGeometry()
-        target_width = min(1560, max(980, int(available.width() * 0.92)))
-        target_height = min(940, max(640, int(available.height() * 0.88)))
-        self.resize(target_width, target_height)
-
-        frame = self.frameGeometry()
-        frame.moveCenter(available.center())
-        self.move(frame.topLeft())
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -250,7 +233,10 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.right_tabs)
         splitter.setSizes([280, 580, 680])
 
-        self.setCentralWidget(central)
+        self._central_widget = central
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(central)
 
 
     def _connect_signals(self) -> None:
@@ -453,16 +439,20 @@ class MainWindow(QMainWindow):
         self.feature_title.setVisible(not self._embedded_mode)
         self.feature_desc.setVisible(not self._embedded_mode)
         self.summary_label.setVisible(not self._embedded_mode)
-        self.log_panel.setVisible(not self._embedded_mode)
+        # Logs remain part of the activity workspace when embedded.  The shell
+        # owns navigation/title chrome, not run diagnostics, so hiding this
+        # panel would make long-running jobs impossible to inspect in-context.
+        self.log_panel.setVisible(True)
         self.run_status_panel.set_compact_mode(self._embedded_mode)
         if self._embedded_mode:
             self.setMinimumSize(0, 0)
             self.main_splitter.setSizes([0, 760, 440])
         else:
             self.setMinimumSize(980, 640)
-        central = self.centralWidget()
+        central = self._central_widget
         if central is not None and central.layout() is not None:
-            central.layout().setContentsMargins(0, 0, 0, 0) if self._embedded_mode else central.layout().setContentsMargins(14, 14, 14, 14)
+            margins = (0, 0, 0, 0) if self._embedded_mode else (14, 14, 14, 14)
+            central.layout().setContentsMargins(*margins)
 
     def open_feature(self, feature_name: str, action_name: str = "train") -> bool:
         """Public capability seam used by the Cosmos activity catalog."""
@@ -1306,3 +1296,90 @@ class MainWindow(QMainWindow):
         head = max_chars // 2 - 2
         tail = max_chars - head - 3
         return f"{text[:head]}...{text[-tail:]}"
+
+
+class MainWindow(QMainWindow):
+    """Standalone compatibility shell for the training workspace.
+
+    ``TrainingWorkspacePage`` is the actual business workspace and can be
+    mounted directly in the Cosmos toolbox.  This adapter intentionally owns
+    only application chrome and forwards the historical public attributes and
+    methods to the page, so scripts launching ``trainer_gui.app`` keep working
+    without nesting a ``QMainWindow`` inside the toolbox.
+    """
+
+    STATUS_META = TrainingWorkspacePage.STATUS_META
+
+    def __init__(self, project_root: str | Path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._workspace_page = TrainingWorkspacePage(project_root, self)
+        self.setWindowTitle("训练管理工作台")
+        self.setMinimumSize(980, 640)
+        self.setCentralWidget(self._workspace_page)
+        self._build_chrome()
+        self._resize_to_available_screen()
+
+    def _build_chrome(self) -> None:
+        menu = self.menuBar().addMenu("训练")
+        settings_action = menu.addAction("设置")
+        settings_action.triggered.connect(self._workspace_page._open_settings)
+        menu.addSeparator()
+        close_action = menu.addAction("关闭")
+        close_action.triggered.connect(self.close)
+        self.statusBar().showMessage("训练工作台已就绪")
+
+    def _resize_to_available_screen(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1100, 700)
+            return
+        available = screen.availableGeometry()
+        target_width = min(1560, max(980, int(available.width() * 0.92)))
+        target_height = min(940, max(640, int(available.height() * 0.88)))
+        self.resize(target_width, target_height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+
+    def bind_workspace_router(self, router, workspace_key: str = "training") -> None:
+        self._workspace_page.bind_workspace_router(router, workspace_key=workspace_key)
+        # Keep the old standalone object-level contract used by callers that
+        # temporarily embed a MainWindow instance.
+        self.setMinimumSize(0, 0)
+
+    def bind_project_context(self, context) -> None:
+        self._workspace_page.bind_project_context(context)
+
+    def apply_project_context(self, state) -> None:
+        self._workspace_page.apply_project_context(state)
+
+    def shutdown(self) -> None:
+        self._workspace_page.shutdown()
+
+    # Keep the methods that are introspected by downstream callers as real
+    # methods on the adapter; all other public attributes/methods are handled
+    # by ``__getattr__`` below.
+    def _generate_command(self):
+        # The page keeps command preview in the existing tab (right_tabs.setCurrentIndex).
+        return self._workspace_page._generate_command()
+
+    def _show_text_dialog(self, title: str, content: str):
+        return self._workspace_page._show_text_dialog(title, content)
+
+    def _open_settings(self):
+        return self._workspace_page._open_settings()
+
+    def open_feature(self, feature_name: str, action_name: str = "train") -> bool:
+        return self._workspace_page.open_feature(feature_name, action_name)
+
+    def __getattr__(self, name: str):
+        # QMainWindow invokes attribute lookup during QObject setup; only
+        # forward after the page has been constructed to avoid recursion.
+        page = self.__dict__.get("_workspace_page")
+        if page is not None:
+            return getattr(page, name)
+        raise AttributeError(name)
+
+    def closeEvent(self, event) -> None:
+        self._workspace_page.shutdown()
+        super().closeEvent(event)

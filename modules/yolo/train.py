@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .action_plan import YoloActionPlan
+
 
 TASK_CHOICES = ["detect", "segment", "classify", "pose"]
 SERIES_CHOICES = ["yolo11", "yolo26"]
@@ -53,23 +55,20 @@ def build_argparser() -> argparse.ArgumentParser:
 
 
 def resolve_model_name(task: str, model_series: str, model_size: str, custom_model: str) -> str:
-    if custom_model.strip():
-        return custom_model.strip()
-    base = f"{model_series}{model_size}"
-    if task == "segment":
-        return f"{base}-seg.pt"
-    if task == "classify":
-        return f"{base}-cls.pt"
-    if task == "pose":
-        return f"{base}-pose.pt"
-    return f"{base}.pt"
+    return YoloActionPlan(
+        "train",
+        task=task,
+        model_series=model_series,
+        model_size=model_size,
+        custom_model=custom_model,
+    ).model_name
 
 
 def split_output_target(save_dir: Path, run_name: str) -> tuple[Path, str]:
-    save_dir = save_dir.resolve()
-    if run_name.strip():
-        return save_dir.parent, run_name.strip()
-    return save_dir.parent, save_dir.name
+    plan = YoloActionPlan("train", save_dir=save_dir.resolve(), run_name=run_name)
+    intent = plan.materialization_intent()
+    assert intent.project is not None and intent.name is not None
+    return intent.project, intent.name
 
 
 def train(args: argparse.Namespace) -> None:
@@ -82,8 +81,29 @@ def train(args: argparse.Namespace) -> None:
     except ImportError as exc:
         raise SystemExit("ultralytics is not installed. Install it with: python -m pip install ultralytics") from exc
 
-    model_name = resolve_model_name(args.task, args.model_series, args.model_size, args.custom_model)
-    project_dir, run_name = split_output_target(args.save_dir, args.run_name)
+    plan = YoloActionPlan(
+        "train",
+        task=args.task,
+        model_series=args.model_series,
+        model_size=args.model_size,
+        custom_model=args.custom_model,
+        data=data_path,
+        epochs=args.epochs,
+        imgsz=args.imgsz,
+        batch=args.batch,
+        device=args.device,
+        save_dir=args.save_dir.resolve(),
+        run_name=args.run_name,
+        workers=args.workers,
+        patience=args.patience,
+        seed=args.seed,
+        cache=args.cache,
+        amp=args.amp,
+    )
+    intent = plan.materialization_intent()
+    assert intent.project is not None and intent.name is not None
+    project_dir, run_name = intent.project, intent.name
+    model_name = plan.model_name
 
     print("=" * 60)
     print(f"YOLO task      : {args.task}")
@@ -94,24 +114,7 @@ def train(args: argparse.Namespace) -> None:
     print("=" * 60)
 
     model = YOLO(model_name)
-    train_kwargs = {
-        "data": str(data_path),
-        "task": args.task,
-        "epochs": args.epochs,
-        "imgsz": args.imgsz,
-        "batch": args.batch,
-        "project": str(project_dir),
-        "name": run_name,
-        "workers": args.workers,
-        "patience": args.patience,
-        "seed": args.seed,
-        "cache": args.cache,
-        "amp": args.amp,
-    }
-    if args.device is not None:
-        train_kwargs["device"] = args.device
-
-    model.train(**train_kwargs)
+    model.train(**plan.train_kwargs())
 
 
 def main() -> None:

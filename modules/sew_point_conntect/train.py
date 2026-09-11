@@ -24,6 +24,7 @@ from .datasets import (
     split_json_paths,
     summarize_samples,
 )
+from .evaluation_core import summarize_counts
 from .model_registry import DEFAULT_MODEL, get_model, model_choices
 from sew_point.inference import KeypointDetector
 
@@ -42,18 +43,16 @@ def set_seed(seed: int):
 def compute_metrics(logits: torch.Tensor, labels: torch.Tensor, threshold: float = 0.5) -> dict:
     probs = torch.sigmoid(logits)
     pred = (probs >= threshold).float()
-    tp = float(((pred == 1) & (labels == 1)).sum().item())
-    fp = float(((pred == 1) & (labels == 0)).sum().item())
-    fn = float(((pred == 0) & (labels == 1)).sum().item())
-    precision = tp / max(tp + fp, 1.0)
-    recall = tp / max(tp + fn, 1.0)
-    f1 = 2 * precision * recall / max(precision + recall, 1e-8)
+    tp = int(((pred == 1) & (labels == 1)).sum().item())
+    fp = int(((pred == 1) & (labels == 0)).sum().item())
+    fn = int(((pred == 0) & (labels == 1)).sum().item())
+    metrics = summarize_counts(tp, fp, fn)
     accuracy = float((pred == labels).float().mean().item())
     return {
         "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
+        "precision": metrics["precision"],
+        "recall": metrics["recall"],
+        "f1": metrics["f1"],
     }
 
 

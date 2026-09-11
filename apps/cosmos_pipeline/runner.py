@@ -14,26 +14,38 @@ from typing import Any
 import yaml
 
 from cosmos_toolbox.paths import COSMOS_ROOT
+from cosmos_toolbox.training.cab_f_project import project_entry
+
+from .case_decision import (
+    CheckFact,
+    SlotDecision,
+    aggregate_case,
+    collect_failed_results,
+    decide_slot,
+    select_product_id,
+)
+from .outcome import business_outcome, cli_exit_code
+from .request_plan import (
+    InputSlot as _InputSlot,
+    PipelineDescriptor as _PipelineDescriptor,
+    ProjectFamily,
+    backend_key_for_project as _backend_key_for_project,
+    describe_product_config,
+    plan_input_manifest,
+    route_project,
+    select_engine,
+)
+from .runtime_session import CosmosRuntimeSession, build_runtime_session
 
 
 DEFAULT_BACKEND_CONFIG = COSMOS_ROOT / "assets" / "config" / "backend_config.yaml"
 DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parents[2] / "artifacts" / "cosmos_pipeline"
 
-
-@dataclass(frozen=True, slots=True)
-class InputSlot:
-    name: str
-    min_files: int = 1
-    max_files: int = 1
-
-
-@dataclass(frozen=True, slots=True)
-class PipelineDescriptor:
-    project: str
-    product: str
-    backend_key: str
-    engine_default: str
-    slots: tuple[InputSlot, ...]
+# Private aliases make the moved core types/functions available through the
+# historical runner module interface without duplicating their rules.
+InputSlot = _InputSlot
+PipelineDescriptor = _PipelineDescriptor
+backend_key_for_project = _backend_key_for_project
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,78 +79,27 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def backend_key_for_project(project: str) -> str:
-    normalized = project.lower().replace("-", "_")
-    return "dab" if normalized.startswith("dab") else normalized
-
-
 def describe_config(path: str | Path) -> PipelineDescriptor:
     data = _read_yaml(Path(path).expanduser().resolve())
-    inspection = data.get("inspection")
-    if not isinstance(inspection, dict):
-        raise ValueError("产品配置缺少 inspection")
-    project = str(inspection.get("project") or "").strip()
-    product = str(inspection.get("product") or "").strip()
-    conf = inspection.get("conf")
-    if not project or not isinstance(conf, dict):
-        raise ValueError("产品配置缺少 inspection.project 或 inspection.conf")
-
-    if project == "CAB":
-        loader = data.get("image_loader") or {}
-        nested = loader.get("loaders") if isinstance(loader, dict) else None
-        file_count = max(1, len(nested)) if isinstance(nested, list) else 1
-        slots = (InputSlot("combined", file_count, file_count),)
-        engine = "service"
-    else:
-        preferred = {"top", "bottom"} if project == "CAB-F" else {"front", "back"}
-        face_names = tuple(str(name) for name, value in conf.items() if name in preferred and isinstance(value, dict))
-        if not face_names:
-            face_names = tuple(str(key) for key, value in conf.items() if isinstance(value, dict))
-        if not face_names:
-            raise ValueError("inspection.conf 没有输入侧别")
-        slots = tuple(InputSlot(name) for name in face_names)
-        engine = "service" if project.startswith("DAB") else "local"
-    return PipelineDescriptor(project, product, backend_key_for_project(project), engine, slots)
+    return describe_product_config(data)
 
 
 def load_input_manifest(path: str | Path, descriptor: PipelineDescriptor) -> list[InputCase]:
     manifest_path = Path(path).expanduser().resolve()
     data = _read_yaml(manifest_path)
-    raw_cases = data.get("cases")
-    if not isinstance(raw_cases, list) or not raw_cases:
-        raise ValueError("输入清单必须包含非空 cases 列表")
     base = manifest_path.parent
-    slot_map = {slot.name: slot for slot in descriptor.slots}
     cases: list[InputCase] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(raw_cases, start=1):
-        if not isinstance(raw, dict) or not isinstance(raw.get("inputs"), dict):
-            raise ValueError(f"cases[{index - 1}] 缺少 inputs")
-        case_id = str(raw.get("id") or f"case-{index:03d}").strip()
-        if case_id in seen:
-            raise ValueError(f"输入清单 case id 重复：{case_id}")
-        seen.add(case_id)
-        unknown = set(raw["inputs"]) - set(slot_map)
-        if unknown:
-            raise ValueError(f"{case_id} 包含未知输入槽：{', '.join(sorted(unknown))}")
+    for planned in plan_input_manifest(data, descriptor):
         resolved: dict[str, tuple[Path, ...]] = {}
-        for name, slot in slot_map.items():
-            values = raw["inputs"].get(name)
-            if isinstance(values, str):
-                values = [values]
-            if not isinstance(values, list):
-                raise ValueError(f"{case_id}.{name} 必须是文件列表")
-            files = tuple((base / str(value)).resolve() if not Path(str(value)).is_absolute() else Path(str(value)).resolve() for value in values)
-            if not slot.min_files <= len(files) <= slot.max_files:
-                raise ValueError(f"{case_id}.{name} 需要 {slot.min_files} 个文件，当前 {len(files)} 个")
+        for name, values in planned.inputs.items():
+            files = tuple(
+                (base / value).resolve() if not Path(value).is_absolute() else Path(value).resolve() for value in values
+            )
             missing = [str(file) for file in files if not file.is_file()]
             if missing:
                 raise FileNotFoundError(f"输入文件不存在：{', '.join(missing)}")
             resolved[name] = files
-        color_space = str(raw.get("color_space") or data.get("color_space") or "rgb").lower()
-        if color_space not in {"rgb", "bgr", "gray"}:
-            raise ValueError(f"{case_id}.color_space 仅支持 rgb/bgr/gray")
-        cases.append(InputCase(case_id, resolved, color_space))
+        cases.append(InputCase(planned.case_id, resolved, planned.color_space))
     return cases
 
 
@@ -150,9 +111,8 @@ def validate_request(request: PipelineRequest) -> tuple[PipelineDescriptor, list
     ):
         if not path.is_file():
             raise FileNotFoundError(f"{label}不存在：{path}")
-    if request.engine not in {"auto", "local", "service"}:
-        raise ValueError(f"未知执行引擎：{request.engine}")
     descriptor = describe_config(request.config_path)
+    select_engine(request.engine, descriptor)
     backend = _read_yaml(request.backend_config_path)
     if descriptor.backend_key not in backend:
         raise ValueError(f"后端配置缺少项目节点：{descriptor.backend_key}")
@@ -231,19 +191,29 @@ def _save_image(path: Path, image: Any, color_space: str) -> None:
     encoded.tofile(path)
 
 
-def _configure_cosmos(request: PipelineRequest, descriptor: PipelineDescriptor) -> None:
+def _configure_cosmos(
+    request: PipelineRequest,
+    descriptor: PipelineDescriptor,
+) -> CosmosRuntimeSession:
     from biz import config_loader
 
     config_loader.config.load_config(str(request.config_path))
-    backend = config_loader.load_config(str(request.backend_config_path))
-    subtree = backend.get(descriptor.backend_key)
-    if not isinstance(subtree, dict):
-        raise ValueError(f"后端配置缺少项目节点：{descriptor.backend_key}")
-    config_loader.reload_backend_config({descriptor.backend_key: subtree}, project=descriptor.backend_key)
-    resolved_backend = config_loader.get_backend_config().get(descriptor.backend_key)
-    if not isinstance(resolved_backend, dict):
-        raise ValueError(f"后端配置未加载项目节点：{descriptor.backend_key}")
-    _validate_backend_model_paths(resolved_backend)
+    declared_backend = config_loader.load_config(str(request.backend_config_path))
+    # Registry resolution depends on the just-loaded product config, so it is
+    # an imperative adapter concern.  Resolve the request's own backend data;
+    # never consult the process-global default-backend cache here.
+    resolved_backend = config_loader._resolve_registry_paths(deepcopy(declared_backend))
+    runtime = build_runtime_session(
+        {"inspection": config_loader.config.inspection},
+        resolved_backend,
+        descriptor.backend_key,
+    )
+    _validate_backend_model_paths(dict(runtime.backend_subtree))
+    # Parent Cosmos algorithms remain compatibility adapters for now and read
+    # this global at import time.  Full replacement also initializes an empty
+    # lazy cache, fixing first-load custom backend selection.
+    config_loader.reload_backend_config(deepcopy(dict(runtime.backend)))
+    return runtime
 
 
 def _validate_backend_model_paths(subtree: dict[str, Any]) -> None:
@@ -272,47 +242,57 @@ def _validate_backend_model_paths(subtree: dict[str, Any]) -> None:
 
 
 def _engine(request: PipelineRequest, descriptor: PipelineDescriptor) -> str:
-    return descriptor.engine_default if request.engine == "auto" else request.engine
+    return select_engine(request.engine, descriptor)
 
 
-def _detect_local(descriptor: PipelineDescriptor, slot: str, images: list[Any], index: int):
-    from biz.config_loader import config
+def _detect_local(
+    descriptor: PipelineDescriptor,
+    slot: str,
+    images: list[Any],
+    index: int,
+    runtime: CosmosRuntimeSession | None = None,
+):
+    if runtime is None:
+        from biz.config_loader import config
 
-    conf = deepcopy(config.inspection.get("conf") or {})
-    project = descriptor.project
-    if project == "CAB":
+        inspection = config.inspection
+    else:
+        inspection = runtime.inspection
+
+    conf = deepcopy(inspection.get("conf") or {})
+    route = route_project(descriptor.project)
+    if route.family is ProjectFamily.CAB:
         from algo.cab_eval import cab_evaluation
 
         return images[-1], cab_evaluation(images, conf)
-    if project == "CAB-F":
-        from algo.cab_f_eval import cab_f_evaluation
-
+    if route.family is ProjectFamily.CAB_F:
         conf["face"] = index
-        return cab_f_evaluation(images[-1], conf)
-    if project.startswith("DAB"):
+        return project_entry().cab_f_evaluation(images[-1], conf)
+    if route.family is ProjectFamily.DAB:
         from algo.dab_eval import dab_evaluation
         from utils import rotate_image
 
-        image = rotate_image(images[0], config.inspection.get("rotate", 0))
+        image = rotate_image(images[0], inspection.get("rotate", 0))
         conf["face"] = index
         return image, dab_evaluation(image, conf)
-    if project == "OS-DAB":
+    if route.family is ProjectFamily.OS_DAB:
         from algo.os_dab_eval import os_dab_evaluation
         from utils import rotate_image
 
-        image = rotate_image(images[0], config.inspection.get("rotate", 0))
+        image = rotate_image(images[0], inspection.get("rotate", 0))
         conf["face"] = index
         result, prepared = os_dab_evaluation(image, conf)
         return prepared, result
-    raise ValueError(f"不支持的 Cosmos 项目：{project}")
+    raise AssertionError(f"unhandled project route: {route.family}")
 
 
 def _detect_service(descriptor: PipelineDescriptor, images: list[Any], index: int):
     from biz.services.algo_service import AlgoService
 
-    if descriptor.project == "CAB":
+    route = route_project(descriptor.project)
+    if route.service_mode == "images":
         return images[-1], AlgoService.inspect_images(images, index)
-    if descriptor.project.startswith("DAB"):
+    if route.service_mode == "image":
         return images[0], AlgoService.inspect_np_image(images[0], index)
     raise ValueError(f"{descriptor.project} 没有生产算法服务入口，请使用 local/auto")
 
@@ -324,96 +304,113 @@ def _evaluate_and_draw(
     index: int,
     *,
     draw_output: bool = True,
+    runtime: CosmosRuntimeSession | None = None,
 ):
-    from biz.checker import CABFChecker, Checker, OSDABChecker
-    from biz.config_loader import config
+    from biz.checker import Checker, OSDABChecker
+
+    if runtime is None:
+        from biz.config_loader import config
+
+        inspection = config.inspection
+    else:
+        inspection = runtime.inspection
 
     project = descriptor.project
-    definitions = (config.inspection.get("ok_checkers") or [])[index] or []
+    route = route_project(project)
+    definitions = (inspection.get("ok_checkers") or [])[index] or []
     checks: dict[str, Any] = {}
-    messages: list[str] = []
-    passed = True
+    check_facts: list[CheckFact] = []
     face = descriptor.slots[index].name
-    calibration = result.get("calibration") if project == "OS-DAB" else None
-    if isinstance(calibration, dict) and not calibration.get("ok", True):
-        passed = False
-        messages.append("图像校正失败")
+    calibration = result.get("calibration") if route.family is ProjectFamily.OS_DAB else None
+    calibration_ok = not (isinstance(calibration, dict) and not calibration.get("ok", True))
     for definition in definitions:
         method = str(definition.get("check_method") or "")
-        if project == "CAB-F":
-            outcome = CABFChecker.evaluate(method, result, config.inspection.get("conf") or {})
+        if route.family is ProjectFamily.CAB_F:
+            outcome = project_entry().CABFChecker.evaluate(method, result, inspection.get("conf") or {})
             ok, message = outcome.as_tuple()
             checks[method] = outcome
-        elif project == "OS-DAB":
-            ok, message = getattr(OSDABChecker, method)(result, (config.inspection.get("conf") or {}).get(face, {}))
+        elif route.family is ProjectFamily.OS_DAB:
+            ok, message = getattr(OSDABChecker, method)(result, (inspection.get("conf") or {}).get(face, {}))
             checks[method] = ok
-        elif project.startswith("DAB"):
-            ok, message = getattr(Checker, method)(result, (config.inspection.get("conf") or {}).get(face, {}))
+        elif route.family is ProjectFamily.DAB:
+            ok, message = getattr(Checker, method)(result, (inspection.get("conf") or {}).get(face, {}))
             checks[method] = ok
         else:
-            ok, message = getattr(Checker, method)(result, config.inspection.get("conf") or {})
+            ok, message = getattr(Checker, method)(result, inspection.get("conf") or {})
             checks[method] = ok
-        if not ok:
-            passed = False
-            if message:
-                messages.append(str(message))
-    for path, error in _collect_failed_results(result):
-        passed = False
-        messages.append(f"{path} 执行失败：{error}")
+        check_facts.append(CheckFact(method, bool(ok), str(message or "")))
+
+    failure_facts = collect_failed_results(result)
+    slot_decision = decide_slot(
+        face,
+        (),
+        checks=check_facts,
+        failures=failure_facts,
+        calibration_ok=calibration_ok,
+    )
+    passed = slot_decision.passed
+    messages = list(slot_decision.messages)
 
     if not draw_output:
         return passed, checks, messages, None
 
     import numpy as np
 
-    from algo import cab_drawing, cab_f_drawing, dab_drawing, os_dab_drawing
+    from algo import cab_drawing, dab_drawing, os_dab_drawing
     from algo.utils import adjust
 
-    if project == "CAB-F":
-        drawn = cab_f_drawing.draw(image, result, config.inspection.get("conf") or {}, checks)
-    elif project == "OS-DAB":
-        drawn = os_dab_drawing.draw(image, result, (config.inspection.get("conf") or {}).get(face, {}), checks)
-    elif project.startswith("DAB"):
+    if route.family is ProjectFamily.CAB_F:
+        drawn = project_entry().draw_inspection_result(image, result, inspection.get("conf") or {}, checks)
+    elif route.family is ProjectFamily.OS_DAB:
+        drawn = os_dab_drawing.draw(image, result, (inspection.get("conf") or {}).get(face, {}), checks)
+    elif route.family is ProjectFamily.DAB:
         if result.get("face") == "back" and "origin_anchors" in result:
             image, _ = adjust(image, np.array(result["origin_anchors"]))
-            drawn = dab_drawing.draw(image, result, (config.inspection.get("conf") or {}).get(face, {}), checks)
+            drawn = dab_drawing.draw(image, result, (inspection.get("conf") or {}).get(face, {}), checks)
         elif result.get("face") == "back":
             target = np.stack((image.copy(),) * 3, axis=-1) if getattr(image, "ndim", 0) == 2 else image
             drawn = {"output": target}
         else:
-            drawn = dab_drawing.draw(image, result, (config.inspection.get("conf") or {}).get(face, {}), checks)
+            drawn = dab_drawing.draw(image, result, (inspection.get("conf") or {}).get(face, {}), checks)
     else:
-        drawn = cab_drawing.draw(image, result, config.inspection.get("conf") or {}, checks)
+        drawn = cab_drawing.draw(image, result, inspection.get("conf") or {}, checks)
     annotated = drawn.get("output") if isinstance(drawn, dict) else drawn
     return passed, checks, messages, annotated
 
 
 def _collect_failed_results(node: Any, path: str = "result") -> list[tuple[str, str]]:
-    if isinstance(node, dict):
-        failures: list[tuple[str, str]] = []
-        if node.get("failed") is True:
-            failures.append((path, str(node.get("error") or "未知错误")))
-        for key, value in node.items():
-            if key not in {"failed", "error"}:
-                failures.extend(_collect_failed_results(value, f"{path}.{key}"))
-        return failures
-    if isinstance(node, (list, tuple)):
-        failures = []
-        for index, value in enumerate(node):
-            failures.extend(_collect_failed_results(value, f"{path}[{index}]"))
-        return failures
-    return []
+    """Compatibility wrapper retaining the legacy tuple-returning helper."""
+
+    return [(failure.path, failure.error) for failure in collect_failed_results(node, path)]
 
 
-def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: PipelineRequest, output_dir: Path) -> dict[str, Any]:
-    from biz.checker import Extractor
+def _legacy_runtime_session(descriptor: PipelineDescriptor) -> CosmosRuntimeSession:
+    """Snapshot legacy globals for private-call compatibility tests/callers."""
+
     from biz.config_loader import backend_config, config
+
+    return CosmosRuntimeSession(
+        inspection=config.inspection,
+        backend_key=descriptor.backend_key,
+        backend={descriptor.backend_key: backend_config.get(descriptor.backend_key, {})},
+    )
+
+
+def _run_case(
+    case: InputCase,
+    descriptor: PipelineDescriptor,
+    request: PipelineRequest,
+    output_dir: Path,
+    runtime: CosmosRuntimeSession | None = None,
+) -> dict[str, Any]:
+    from biz.checker import Extractor
     from biz.result import InspectionResultDto
 
+    runtime = runtime or _legacy_runtime_session(descriptor)
     dto = InspectionResultDto(descriptor.product, descriptor.project)
     product_id: str | None = None
     reports: list[dict[str, Any]] = []
-    overall = True
+    slot_decisions: list[SlotDecision] = []
     engine = _engine(request, descriptor)
     started = perf_counter()
     for index, slot in enumerate(descriptor.slots):
@@ -423,7 +420,7 @@ def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: Pipeline
         image, result = (
             _detect_service(descriptor, images, index)
             if engine == "service"
-            else _detect_local(descriptor, slot.name, images, index)
+            else _detect_local(descriptor, slot.name, images, index, runtime)
         )
         if not isinstance(result, dict):
             raise RuntimeError(f"{slot.name} 检测未返回结果对象")
@@ -433,12 +430,11 @@ def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: Pipeline
             image,
             index,
             draw_output=request.save_annotated_images,
+            runtime=runtime,
         )
-        overall = overall and passed
-        face_conf = (config.inspection.get("conf") or {}).get(slot.name, config.inspection.get("conf") or {})
+        face_conf = runtime.face_config(slot.name)
         extracted, update_required = Extractor.extract_product_id(result, face_conf)
-        if extracted and (product_id is None or str(product_id).startswith("unknown_") or update_required):
-            product_id = str(extracted)
+        product_id = select_product_id(product_id, extracted, update_required)
 
         annotated_path = output_dir / f"{slot.name}_annotated.png"
         result_path = output_dir / f"{slot.name}_result.json"
@@ -449,28 +445,46 @@ def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: Pipeline
         if request.save_annotated_images:
             dto.images["result_image"].append(str(annotated_path))
         dto.result_details.append(json.dumps(_serializable(result), ensure_ascii=False))
-        dto.conf.append(json.dumps(_serializable(config.inspection), ensure_ascii=False))
-        dto.model_info.append(json.dumps(_serializable(backend_config), ensure_ascii=False))
-        for message in messages:
-            if message not in dto.err_msgs:
-                dto.err_msgs.append(message)
-                dto.err_file_map[message] = str(paths[-1])
-        reports.append({
-            "slot": slot.name,
-            "inputs": [str(path) for path in paths],
-            "passed": passed,
-            "messages": messages,
-            "result_json": str(result_path),
-            "annotated_image": str(annotated_path) if request.save_annotated_images else None,
-        })
-        _event("business_result", case=case.case_id, slot=slot.name, outcome="OK" if passed else "NG")
+        dto.conf.append(json.dumps(_serializable(runtime.inspection), ensure_ascii=False))
+        dto.model_info.append(json.dumps(_serializable(runtime.backend), ensure_ascii=False))
+        slot_decisions.append(
+            SlotDecision(
+                slot=slot.name,
+                inputs=tuple(str(path) for path in paths),
+                passed=passed,
+                messages=tuple(messages),
+            )
+        )
+        reports.append(
+            {
+                "slot": slot.name,
+                "inputs": [str(path) for path in paths],
+                "passed": passed,
+                "messages": messages,
+                "result_json": str(result_path),
+                "annotated_image": str(annotated_path) if request.save_annotated_images else None,
+            }
+        )
+        _event(
+            "business_result",
+            case=case.case_id,
+            slot=slot.name,
+            outcome=business_outcome(passed).business_label,
+        )
         # Full-size line-scan images are hundreds of MiB each.  Release the
         # completed slot before the next slot image is loaded; otherwise the
         # previous source/result/annotation stay live while the next RHS is
         # evaluated and can push a two-face CAB-F run over its memory limit.
         del images, image, result, annotated
 
-    dto.update_result(product_id, overall, True)
+    case_decision = aggregate_case(case.case_id, slot_decisions, product_id=product_id)
+    overall = case_decision.passed
+    error_file_map = dict(case_decision.error_file_map)
+    for message in case_decision.error_messages:
+        if message not in dto.err_msgs:
+            dto.err_msgs.append(message)
+            dto.err_file_map[message] = error_file_map.get(message, "")
+    dto.update_result(case_decision.product_id, case_decision.passed, True)
     persisted = False
     if request.persist_db:
         from biz.result_writer import ResultWriter
@@ -482,7 +496,7 @@ def _run_case(case: InputCase, descriptor: PipelineDescriptor, request: Pipeline
         "case_id": case.case_id,
         "project": descriptor.project,
         "product": descriptor.product,
-        "product_id": product_id,
+        "product_id": case_decision.product_id,
         "engine": engine,
         "input_color_space": case.color_space,
         "passed": overall,
@@ -517,14 +531,14 @@ def _execute(request: PipelineRequest) -> int:
     }
     overall = True
     try:
-        _configure_cosmos(request, descriptor)
+        runtime = _configure_cosmos(request, descriptor)
         if session_recorder is not None:
             session_recorder.snapshot("after_configure")
         for current, case in enumerate(cases, start=1):
             _event("progress", current=current - 1, total=len(cases), case=case.case_id)
             case_dir = request.output_dir / case.case_id
             case_dir.mkdir(parents=True, exist_ok=True)
-            report = _run_case(case, descriptor, request, case_dir)
+            report = _run_case(case, descriptor, request, case_dir, runtime)
             summary["cases"].append(report)
             overall = overall and bool(report["passed"])
             if session_recorder is not None:
@@ -541,9 +555,10 @@ def _execute(request: PipelineRequest) -> int:
         if session_recorder is not None:
             session_recorder.snapshot("pipeline_finished")
             session_recorder.write()
+    outcome = business_outcome(overall)
     _event("artifact", path=request.output_dir)
-    _event("complete", outcome="OK" if overall else "NG")
-    return 2 if request.fail_on_ng and not overall else 0
+    _event("complete", outcome=outcome.business_label)
+    return cli_exit_code(outcome, fail_on_ng=request.fail_on_ng)
 
 
 def execute(request: PipelineRequest) -> int:
@@ -557,7 +572,9 @@ def execute(request: PipelineRequest) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the complete Cosmos inspection flow without production UI/hardware.")
+    parser = argparse.ArgumentParser(
+        description="Run the complete Cosmos inspection flow without production UI/hardware."
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--backend-config", default=str(DEFAULT_BACKEND_CONFIG))
     parser.add_argument("--input-manifest", required=True)

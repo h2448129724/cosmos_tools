@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .evaluation_core import estimate_point_spacing, match_points
+
 
 JSON_GLOB = "*.json"
 
@@ -107,21 +109,11 @@ def resolve_image_path(annotation: dict, json_path: str, image_dir: str) -> str:
 
 
 def estimate_spacing(xy: np.ndarray, default_spacing: float = 28.0) -> float:
-    if len(xy) < 2:
-        return float(default_spacing)
-    diff = xy[:, None, :] - xy[None, :, :]
-    dist = np.linalg.norm(diff, axis=-1)
-    np.fill_diagonal(dist, np.inf)
-    nn = np.min(dist, axis=1)
-    valid = nn[np.isfinite(nn)]
-    if len(valid) == 0:
-        return float(default_spacing)
-    q1, q3 = np.percentile(valid, [25, 75])
-    iqr = max(float(q3 - q1), 1e-6)
-    keep = valid[(valid >= q1 - 1.5 * iqr) & (valid <= q3 + 1.5 * iqr)]
-    if len(keep) == 0:
-        keep = valid
-    return float(np.median(keep))
+    point_facts = tuple(
+        {"x": float(point[0]), "y": float(point[1])}
+        for point in xy
+    )
+    return estimate_point_spacing(point_facts, default_spacing)
 
 
 def _build_positive_edge_set(annotation: dict, id_to_index: dict[int, int]) -> set[tuple[int, int]]:
@@ -403,10 +395,6 @@ def _normalize_gt_points(annotation: dict) -> list[dict]:
     return points
 
 
-def _point_match_radius(spacing: float, factor: float = 0.45, minimum: float = 4.0) -> float:
-    return max(minimum, float(spacing) * factor)
-
-
 def _deduplicate_points_by_id(points: list[dict]) -> list[dict]:
     best_by_id: dict[int, dict] = {}
     for point in points:
@@ -423,39 +411,19 @@ def match_points_by_geometry(
     match_radius: float | None = None,
     default_spacing: float = 28.0,
 ) -> tuple[list[tuple[int, int, float]], list[int | None]]:
-    gt_points = _normalize_gt_points({"points": gt_points})
-    if gt_points:
-        gt_xy = np.asarray([[point["x"], point["y"]] for point in gt_points], dtype=np.float32)
-        spacing = estimate_spacing(gt_xy, default_spacing=default_spacing)
-    else:
-        spacing = float(default_spacing)
-    radius = _point_match_radius(spacing) if match_radius is None else float(match_radius)
-
-    matched_gt_ids: set[int] = set()
-    matches: list[tuple[int, int, float]] = []
-    matched_ids: list[int | None] = []
+    normalized_gt = _normalize_gt_points({"points": gt_points})
     ordered_predictions = sorted(predicted_points, key=lambda item: float(item[2]), reverse=True)
-    for x, y, score in ordered_predictions:
-        pred_xy = np.asarray([float(x), float(y)], dtype=np.float32)
-        best_point = None
-        best_dist = None
-        for gt_point in gt_points:
-            gt_id = int(gt_point["id"])
-            if gt_id in matched_gt_ids:
-                continue
-            dist = float(np.linalg.norm(pred_xy - np.asarray([gt_point["x"], gt_point["y"]], dtype=np.float32)))
-            if dist > radius:
-                continue
-            if best_dist is None or dist < best_dist:
-                best_dist = dist
-                best_point = gt_point
-        gt_id = None
-        if best_point is not None:
-            gt_id = int(best_point["id"])
-            matched_gt_ids.add(gt_id)
-        matches.append((int(round(float(x))), int(round(float(y))), float(score)))
-        matched_ids.append(gt_id)
-    return matches, matched_ids
+    result = match_points(
+        normalized_gt,
+        ordered_predictions,
+        match_radius=match_radius,
+        default_spacing=default_spacing,
+    )
+    matches = [
+        (int(round(float(x))), int(round(float(y))), float(score))
+        for x, y, score in ordered_predictions
+    ]
+    return matches, list(result.matched_gt_ids)
 
 
 def build_perturbed_point_annotation(

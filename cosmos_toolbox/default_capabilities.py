@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 from .activities import ArtifactsActivity, ProjectOverviewPage, SewPointConnectActivity, TaskCenterActivity
-from .capabilities import ActivityStage, Capability, CapabilityCatalog
+from .capabilities import Capability, CapabilityCatalog
+from .capability_catalog import (
+    ActivationKind,
+    ActivationPlan,
+    PlannedCapability,
+    TrainingFeatureFact,
+    WorkspaceCapabilityFact,
+    plan_default_capabilities,
+)
 from .paths import TOOLBOX_ROOT
 from .workspaces import WorkspaceAdapter
+
+
+logger = logging.getLogger(__name__)
 
 
 def _call(method_name: str):
@@ -34,197 +46,110 @@ def build_capability_catalog(
     workspace_adapters: Sequence[WorkspaceAdapter],
     *,
     include_project_capabilities: bool,
+    training_features: Sequence[TrainingFeatureFact] | None = None,
 ) -> CapabilityCatalog:
-    catalog = CapabilityCatalog(
-        (
-            Capability(
-                key="overview",
-                title="项目概览",
-                description="查看项目就绪状态和从数据到模型的工作路径。",
-                stage=ActivityStage.PROJECT,
-                order=0,
-                page_factory=lambda runtime, parent: ProjectOverviewPage(runtime, parent),
-            ),
-        )
-    )
+    """Bind a pure capability plan to concrete Qt/workspace adapters."""
 
-    stage_by_workspace = {
-        "image": ActivityStage.DATA,
-        "labeling": ActivityStage.ANNOTATION,
-        "training": ActivityStage.TRAINING,
-    }
-    for adapter in workspace_adapters:
-        catalog.register(
-            Capability(
-                key=adapter.key,
-                title=adapter.title,
-                description=adapter.description,
-                stage=stage_by_workspace.get(adapter.key, ActivityStage.CUSTOM),
-                order=900,
-                workspace_key=adapter.key,
-                visible=(adapter.key not in {"labeling", "training"}) or not include_project_capabilities,
-            )
-        )
+    feature_facts = (
+        tuple(training_features)
+        if training_features is not None
+        else _scan_training_feature_facts()
+    )
+    workspace_facts = tuple(
+        WorkspaceCapabilityFact(adapter.key, adapter.title, adapter.description)
+        for adapter in workspace_adapters
+    )
+    planned = plan_default_capabilities(
+        workspace_facts,
+        include_project_capabilities=include_project_capabilities,
+        training_features=feature_facts,
+    )
+    return CapabilityCatalog(_bind_planned_capability(item) for item in planned)
 
-    if not include_project_capabilities:
-        return catalog
 
-    generic_labeling_tools = (
-        ("data.keyword_split", "关键字划分", "根据文件名关键字将图片归类到子目录。", "keyword"),
-        ("data.batch_crop", "批量裁剪", "按统一区域批量裁剪图片。", "batch_crop"),
-        ("data.tile_crop", "自动分块", "将大图自动切分为规则小图。", "tile_crop"),
-        ("data.roi_editor", "ROI 编辑", "在图片上配置和复用 ROI。", "roi"),
-        ("data.inner_mask", "内侧 Mask", "生成和检查内侧区域 Mask。", "inner_mask"),
-        ("data.image_filter", "图像筛选", "按图像条件批量筛选素材。", "image_filter"),
-        ("annotation.visualize", "标注可视化", "浏览图片与标注叠加结果。", "label_visualization"),
-    )
-    for order, (key, title, description, tool_name) in enumerate(generic_labeling_tools, start=10):
-        catalog.register(
-            Capability(
-                key=key,
-                title=title,
-                description=description,
-                stage=ActivityStage.ANNOTATION if key.startswith("annotation.") else ActivityStage.DATA,
-                order=order,
-                page_factory=lambda runtime, parent, name=tool_name: _create_labeling_tool_activity(
-                    runtime, parent, name
-                ),
-            )
-        )
-
-    catalog.register(
-        Capability(
-            key="cabf.config_studio",
-            title="CAB-F 基准图与模板生成",
-            description="从 TOP/BOTTOM 初始原图生成全尺寸校准基准图与匹配模板，并在校准坐标系中编辑 ROI。",
-            stage=ActivityStage.DATA,
-            order=0,
-            page_factory=lambda runtime, parent: _create_cabf_config_activity(runtime, parent),
-            keywords=("CAB-F", "ROI", "模板", "配置", "基准图"),
-        )
-    )
-    catalog.register(
-        Capability(
-            key="cosmos.pipeline_test",
-            title="完整流程测试",
-            description="跳过生产页面，按配置运行项目检测、规则判定、产品汇总和结果输出。",
-            stage=ActivityStage.EVALUATION,
-            order=10,
-            page_factory=lambda runtime, parent: _create_cosmos_pipeline_activity(runtime, parent),
-            keywords=("Cosmos", "CAB-F", "Pipeline", "完整流程", "测试", "配置"),
-        )
-    )
-    catalog.register(
-        Capability(
-            key="cabf.sew_point_connect",
-            title="Sew Point Connect",
-            description="连接数据准备、CAB-F 点边复核、模型训练和产物。",
-            stage=ActivityStage.PROJECT,
-            order=20,
-            page_factory=lambda runtime, parent: SewPointConnectActivity(runtime, parent),
-            keywords=("CAB-F", "连边", "点边", "流程"),
-        )
-    )
-    catalog.register(
-        Capability(
-            key="cabf.workflow",
-            title="CAB-F 数据与标注流程",
-            description="筛选、预测、点边修正、校验和训练数据导出。",
-            stage=ActivityStage.ANNOTATION,
-            order=10,
-            workspace_key="labeling",
-            activate=_call("_show_cabf_workflow_dialog"),
-            keywords=("CAB-F", "9步流程", "标注"),
-        )
-    )
-    catalog.register(
-        Capability(
-            key="cabf.graph_editor",
-            title="点边标注",
-            description="修正缝纫点和点之间的连边关系。",
-            stage=ActivityStage.ANNOTATION,
-            order=20,
-            page_factory=lambda runtime, parent: _create_cabf_graph_editor_activity(runtime, parent),
-        )
-    )
-    catalog.register(
-        Capability(
-            key="data.sample_review",
-            title="样本审阅",
-            description="浏览图片和可选标注，保留有效样本或移除异常样本。",
-            stage=ActivityStage.DATA,
-            order=30,
-            page_factory=lambda runtime, parent: _create_dataset_review_activity(runtime, parent),
-            keywords=("图片", "筛选", "复核", "标注", "数据清理"),
-        )
-    )
-    # Compatibility route for saved navigation state and older launchers.  It
-    # is intentionally hidden; CAB-F composes the generic review capability.
-    catalog.register(
-        Capability(
-            key="cabf.point_filter",
-            title="数据筛选（兼容入口）",
-            description="旧 CAB-F 数据筛选入口。",
-            stage=ActivityStage.ANNOTATION,
-            order=30,
-            workspace_key="labeling",
-            activate=_call("_show_point_filter_dialog"),
-            visible=False,
-        )
-    )
-    catalog.register(
-        Capability(
-            key="cabf.dataset_export",
-            title="数据集校验与导出",
-            description="校验母数据并导出训练数据集。",
-            stage=ActivityStage.ANNOTATION,
-            order=40,
-            page_factory=lambda runtime, parent: _create_cabf_dataset_export_activity(runtime, parent),
-        )
-    )
+def _scan_training_feature_facts() -> tuple[TrainingFeatureFact, ...]:
+    """Imperative adapter for module discovery; failures keep workspace fallback."""
 
     try:
         from trainer_gui.feature_scanner import FeatureScanner
 
         features = FeatureScanner(TOOLBOX_ROOT).scan()
     except Exception:
-        features = []
-    for order, feature in enumerate((item for item in features if item.enabled), start=10):
-        default_action = feature.actions[0].action_name if feature.actions else "train"
-        catalog.register(
-            Capability(
-                key=f"training.{feature.feature_name}",
-                title=feature.display_name,
-                description=feature.description or f"配置并运行 {feature.display_name}。",
-                stage=ActivityStage.TRAINING,
-                order=order,
-                workspace_key="training",
-                activate=_open_training(feature.feature_name, default_action),
-                keywords=(feature.feature_name, "训练", "推理", "导出"),
-            )
+        logger.warning(
+            "Training feature discovery failed; keeping the native training workspace visible.",
+            exc_info=True,
         )
+        return ()
+    return tuple(
+        TrainingFeatureFact(
+            feature_name=feature.feature_name,
+            display_name=feature.display_name,
+            description=feature.description,
+            enabled=feature.enabled,
+            action_names=tuple(action.action_name for action in feature.actions),
+        )
+        for feature in features
+    )
 
-    catalog.register(
-        Capability(
-            key="project.artifacts",
-            title="项目产物",
-            description="查看训练、推理和导出产生的模型与文件。",
-            stage=ActivityStage.ARTIFACTS,
-            order=10,
-            page_factory=lambda runtime, parent: ArtifactsActivity(runtime, parent),
-        )
+
+def _bind_planned_capability(planned: PlannedCapability) -> Capability:
+    spec = planned.spec
+    return Capability(
+        key=spec.key,
+        title=spec.title,
+        description=spec.description,
+        stage=spec.stage,
+        order=spec.order,
+        page_factory=(
+            _page_factory_for(planned.page_factory_key)
+            if planned.page_factory_key is not None
+            else None
+        ),
+        workspace_key=planned.workspace_key,
+        activate=_activation_for(planned.activation),
+        keywords=spec.keywords,
+        visible=spec.visible,
     )
-    catalog.register(
-        Capability(
-            key="project.tasks",
-            title="任务与日志",
-            description="集中查看训练和处理任务的状态、进度与日志。",
-            stage=ActivityStage.ARTIFACTS,
-            order=20,
-            page_factory=lambda runtime, parent: TaskCenterActivity(runtime, parent),
+
+
+def _page_factory_for(factory_key: str):
+    if factory_key.startswith("labeling_tool:"):
+        tool_name = factory_key.partition(":")[2]
+        return lambda runtime, parent: _create_labeling_tool_activity(
+            runtime,
+            parent,
+            tool_name,
         )
-    )
-    return catalog
+    factories = {
+        "overview": lambda runtime, parent: ProjectOverviewPage(runtime, parent),
+        "cabf_config": _create_cabf_config_activity,
+        "cabf_field_dataset": _create_field_dataset_activity,
+        "database": _create_database_activity,
+        "cosmos_pipeline": _create_cosmos_pipeline_activity,
+        "sew_point_connect": lambda runtime, parent: SewPointConnectActivity(
+            runtime,
+            parent,
+        ),
+        "cabf_graph_editor": _create_cabf_graph_editor_activity,
+        "dataset_review": _create_dataset_review_activity,
+        "cabf_dataset_export": _create_cabf_dataset_export_activity,
+        "artifacts": lambda runtime, parent: ArtifactsActivity(runtime, parent),
+        "tasks": lambda runtime, parent: TaskCenterActivity(runtime, parent),
+    }
+    try:
+        return factories[factory_key]
+    except KeyError as exc:
+        raise KeyError(f"Unknown page factory key: {factory_key}") from exc
+
+
+def _activation_for(plan: ActivationPlan | None):
+    if plan is None:
+        return None
+    if plan.kind is ActivationKind.CALL_WORKSPACE_METHOD:
+        return _call(plan.target)
+    if plan.kind is ActivationKind.OPEN_TRAINING_FEATURE:
+        return _open_training(plan.target, plan.action)
+    raise ValueError(f"Unsupported capability activation: {plan.kind}")
 
 
 def _create_dataset_review_activity(runtime, parent):
@@ -323,3 +248,23 @@ def _create_cosmos_pipeline_activity(runtime, parent):
     from .cosmos_pipeline_activity import CosmosPipelineActivity
 
     return CosmosPipelineActivity(runtime, parent)
+
+
+def _create_database_activity(runtime, parent):
+    from .database_ui import DatabasePage
+
+    page = DatabasePage(parent)
+    page.protect_window_close(runtime.window)
+    return page
+
+
+def _create_field_dataset_activity(runtime, parent):
+    from .field_dataset_ui import FieldDatasetPage
+
+    page = FieldDatasetPage(parent)
+    state = runtime.project_context.state
+    page.source.setText(state.image_dir or state.dataset_root or "")
+    if state.output_root:
+        page.output.setText(state.output_root)
+    page.protect_window_close(runtime.window)
+    return page

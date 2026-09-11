@@ -6,6 +6,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from img_tools.core.review_session import (
+    ReviewSession,
+    begin_review,
+    clear_review_selection,
+    plan_review_decision,
+    select_review_index,
+)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
@@ -13,7 +20,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,6 +27,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QVBoxLayout,
@@ -37,10 +44,12 @@ from .model import (
     ReviewSpec,
     build_review_result,
     collect_review_items,
+    execute_review_intents,
     make_review_trash_dir,
-    move_review_item,
 )
 from .preview import ImageOnlyPreviewAdapter, ReviewPreviewAdapter
+from cosmos_toolbox.ui import ActionBar, PageHeader, PathField, SectionSurface, StatusBanner
+from cosmos_toolbox.ui.primitives import FlowLayout
 
 
 def read_image_bgr(path: Path) -> np.ndarray:
@@ -93,15 +102,28 @@ class DatasetReviewPage(QWidget):
         self.setWindowTitle(title)
         self.resize(1280, 780)
         self.preview_adapter = preview_adapter or ImageOnlyPreviewAdapter()
-        self.items: list[ReviewItem] = []
-        self.current_index = -1
+        self._session = ReviewSession()
         self.current_item: ReviewItem | None = None
         self.spec: ReviewSpec | None = None
         self.trash_dir: Path | None = None
-        self.accepted_count = 0
-        self.removed_count = 0
         self._build_ui()
         self._connect_signals()
+
+    @property
+    def items(self) -> tuple[ReviewItem, ...]:
+        return self._session.items
+
+    @property
+    def current_index(self) -> int:
+        return self._session.current_index
+
+    @property
+    def accepted_count(self) -> int:
+        return self._session.accepted_count
+
+    @property
+    def removed_count(self) -> int:
+        return self._session.removed_count
 
     @property
     def saved_count(self) -> int:
@@ -134,82 +156,109 @@ class DatasetReviewPage(QWidget):
             self.open_dataset()
 
     def _build_ui(self) -> None:
+        self.setProperty("ownsPageHeader", True)
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
+        root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(8)
 
-        source_bar = QFrame()
-        source_bar.setObjectName("hintPanel")
-        source_layout = QHBoxLayout(source_bar)
-        source_layout.setContentsMargins(10, 8, 10, 8)
+        root.addWidget(PageHeader("数据审阅", "浏览图片样本，逐张决定保留或移除。"))
+
+        source_bar = SectionSurface()
+        source_bar.setAccessibleName("当前数据源")
+        source_layout = source_bar.body_layout
         source_layout.setSpacing(8)
-        source_layout.addWidget(QLabel("数据源"))
+        source_layout.addWidget(QLabel("当前数据源"))
         self.source_summary = QLabel("尚未选择图片目录")
+        self.source_summary.setAccessibleName("当前数据源")
         self.source_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         source_layout.addWidget(self.source_summary, 1)
         self.btn_toggle_source = QPushButton("设置")
         self.btn_toggle_source.setMaximumWidth(72)
+        self.btn_toggle_source.setAccessibleName("展开数据源设置")
+        self.btn_toggle_source.setToolTip("展开或收起数据源路径设置")
         self.btn_load = QPushButton("加载 / 刷新")
+        self.btn_load.setAccessibleName("加载或刷新样本")
+        self.btn_load.setToolTip("按当前数据源加载样本")
         set_primary(self.btn_load)
         source_layout.addWidget(self.btn_toggle_source)
         source_layout.addWidget(self.btn_load)
         root.addWidget(source_bar)
 
-        self.source_panel = QFrame()
-        self.source_panel.setObjectName("card")
-        source_grid = QGridLayout(self.source_panel)
-        source_grid.setContentsMargins(10, 8, 10, 8)
-        source_grid.setHorizontalSpacing(8)
-        source_grid.setVerticalSpacing(6)
+        self.source_panel = SectionSurface()
+        self.source_panel.setAccessibleName("数据源设置")
+        source_layout = self.source_panel.body_layout
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("范围")
+        mode_label.setMinimumWidth(56)
         self.combo_mode = QComboBox()
+        self.combo_mode.setAccessibleName("审阅范围")
+        self.combo_mode.setToolTip("选择全部图片或仅显示带标注图片")
         self.combo_mode.addItem("全部图片（标注可选）", "unlabeled")
         self.combo_mode.addItem("仅显示有标注图片", "labeled")
-        source_grid.addWidget(QLabel("范围"), 0, 0)
-        source_grid.addWidget(self.combo_mode, 0, 1, 1, 2)
-        self.edit_image_dir, self.btn_choose_image_dir = self._add_path_row(
-            source_grid, 0, "图片目录", start_column=3
-        )
-        self.edit_label_dir, self.btn_choose_label_dir = self._add_path_row(source_grid, 1, "标注目录")
-        self.edit_save_dir, self.btn_choose_save_dir = self._add_path_row(
-            source_grid, 1, "保留目录", start_column=3
-        )
-        source_grid.setColumnStretch(1, 1)
-        source_grid.setColumnStretch(4, 1)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.combo_mode, 1)
+        source_layout.addLayout(mode_row)
+        self._image_path_field = PathField("图片目录", browse_text="浏览")
+        self._label_path_field = PathField("标注目录", browse_text="浏览")
+        self._save_path_field = PathField("保留目录", browse_text="浏览")
+        self.edit_image_dir = self._image_path_field.line_edit
+        self.edit_label_dir = self._label_path_field.line_edit
+        self.edit_save_dir = self._save_path_field.line_edit
+        self.btn_choose_image_dir = self._image_path_field.browse_button
+        self.btn_choose_label_dir = self._label_path_field.browse_button
+        self.btn_choose_save_dir = self._save_path_field.browse_button
+        path_scroll = QScrollArea()
+        path_scroll.setObjectName("sourcePathScroll")
+        path_scroll.setWidgetResizable(True)
+        path_scroll.setFrameShape(QFrame.NoFrame)
+        path_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        path_scroll.setMaximumHeight(120)
+        path_container = QWidget()
+        path_flow = FlowLayout(path_container, h_spacing=8, v_spacing=6)
+        path_scroll.setWidget(path_container)
+        source_layout.addWidget(path_scroll)
+        for field in (self._image_path_field, self._label_path_field, self._save_path_field):
+            field.setMinimumWidth(240)
+            field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            path_flow.addWidget(field)
         root.addWidget(self.source_panel)
+        self.source_panel.setVisible(False)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
 
-        browser = QFrame()
-        browser.setObjectName("card")
-        browser.setMinimumWidth(260)
-        browser.setMaximumWidth(340)
-        browser_layout = QVBoxLayout(browser)
-        browser_layout.setContentsMargins(10, 9, 10, 9)
+        browser = SectionSurface()
+        browser.setAccessibleName("样本浏览")
+        browser.setMinimumWidth(220)
+        browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        browser_layout = browser.body_layout
         browser_layout.setSpacing(7)
         browser_title_row = QHBoxLayout()
         browser_title_row.addWidget(QLabel("样本"))
         self.lbl_index = QLabel("0 / 0")
+        self.lbl_index.setAccessibleName("样本进度")
         self.lbl_index.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         browser_title_row.addWidget(self.lbl_index, 1)
         browser_layout.addLayout(browser_title_row)
         self.file_list = QListWidget()
+        self.file_list.setAccessibleName("样本文件列表")
+        self.file_list.setToolTip("选择样本进行预览；可使用 A/D 切换")
         self.file_list.setMinimumHeight(120)
         browser_layout.addWidget(self.file_list, 1)
         self.review_summary = QLabel("标注 -  ·  保留 0  ·  移除 0")
+        self.review_summary.setAccessibleName("审阅统计")
         self.review_summary.setWordWrap(True)
-        self.review_summary.setStyleSheet("color:#475569;font-size:12px;")
         browser_layout.addWidget(self.review_summary)
         splitter.addWidget(browser)
 
-        preview = QFrame()
-        preview.setObjectName("card")
-        preview_layout = QVBoxLayout(preview)
-        preview_layout.setContentsMargins(10, 9, 10, 9)
+        preview = SectionSurface()
+        preview.setAccessibleName("预览")
+        preview_layout = preview.body_layout
         preview_layout.setSpacing(6)
         preview_header = QHBoxLayout()
         preview_header.addWidget(QLabel("预览"))
         self.lbl_current_name = QLabel("未加载图片")
+        self.lbl_current_name.setAccessibleName("当前样本")
         self.lbl_current_name.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_current_name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         preview_header.addWidget(self.lbl_current_name, 1)
@@ -226,27 +275,29 @@ class DatasetReviewPage(QWidget):
         splitter.setSizes([300, 900])
         root.addWidget(splitter, 1)
 
-        action_bar = QFrame()
-        action_layout = QHBoxLayout(action_bar)
-        action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
+        action_bar = ActionBar()
+        action_bar.setAccessibleName("审阅操作")
         self.btn_prev = QPushButton("上一张  A")
         self.btn_next = QPushButton("下一张  D")
         self.btn_accept = QPushButton("保留到目录  S")
         set_primary(self.btn_accept)
         self.btn_remove = QPushButton("移除  W")
         self.btn_complete = QPushButton("完成审阅")
-        action_layout.addWidget(self.btn_prev)
-        action_layout.addWidget(self.btn_next)
-        action_layout.addStretch(1)
-        action_layout.addWidget(self.btn_accept)
-        action_layout.addWidget(self.btn_remove)
-        action_layout.addWidget(self.btn_complete)
+        for button, tip in (
+            (self.btn_prev, "上一张（快捷键 A）"),
+            (self.btn_next, "下一张（快捷键 D）"),
+            (self.btn_accept, "保留当前样本（快捷键 S）"),
+            (self.btn_remove, "移除当前样本（快捷键 W）"),
+            (self.btn_complete, "提交当前审阅结果"),
+        ):
+            button.setToolTip(tip)
+            button.setAccessibleName(tip)
+            action_bar.add_widget(button)
         root.addWidget(action_bar)
 
-        self.status_label = QLabel("设置数据源后加载样本。")
-        self.status_label.setStyleSheet("color:#64748b;font-size:12px;")
-        root.addWidget(self.status_label)
+        self.status_banner = StatusBanner("设置数据源后加载样本。")
+        self.status_label = self.status_banner.label
+        root.addWidget(self.status_banner)
 
         # Compatibility attributes used by older callers during migration.
         self.btn_save = self.btn_accept
@@ -257,22 +308,6 @@ class DatasetReviewPage(QWidget):
         self.lbl_edge_count = QLabel("0")
         self.lbl_saved_count = QLabel("0")
         self.lbl_trash_count = QLabel("0")
-
-    @staticmethod
-    def _add_path_row(
-        layout: QGridLayout,
-        row: int,
-        title: str,
-        *,
-        start_column: int = 0,
-    ) -> tuple[QLineEdit, QPushButton]:
-        edit = QLineEdit()
-        button = QPushButton("浏览")
-        button.setMaximumWidth(72)
-        layout.addWidget(QLabel(title), row, start_column)
-        layout.addWidget(edit, row, start_column + 1)
-        layout.addWidget(button, row, start_column + 2)
-        return edit, button
 
     def _connect_signals(self) -> None:
         self.btn_toggle_source.clicked.connect(lambda: self.source_panel.setVisible(not self.source_panel.isVisible()))
@@ -350,11 +385,8 @@ class DatasetReviewPage(QWidget):
         if spec is None:
             return
         self.spec = spec
-        self.items = collect_review_items(spec)
-        self.current_index = -1
+        self._session = begin_review(collect_review_items(spec))
         self.current_item = None
-        self.accepted_count = 0
-        self.removed_count = 0
         self.trash_dir = None
         self.file_list.blockSignals(True)
         self.file_list.clear()
@@ -376,10 +408,11 @@ class DatasetReviewPage(QWidget):
     def jump_to_index(self, index: int) -> None:
         if not self.items:
             return
-        index = int(np.clip(index, 0, len(self.items) - 1))
-        if index == self.current_index and self.current_item is not None:
+        selected = select_review_index(self._session, index)
+        if selected.current_index == self.current_index and self.current_item is not None:
             return
-        item = self.items[index]
+        item = selected.current_item
+        assert item is not None
         try:
             image = read_image_bgr(item.image_path)
             document = self.preview_adapter.load(item.image_path, item.annotation_path, image)
@@ -387,10 +420,10 @@ class DatasetReviewPage(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "加载失败", str(exc))
             return
-        self.current_index = index
+        self._session = selected
         self.current_item = item
         self.file_list.blockSignals(True)
-        self.file_list.setCurrentRow(index)
+        self.file_list.setCurrentRow(selected.current_index)
         self.file_list.blockSignals(False)
         self.canvas.set_document(image, document)
         self.layer_panel.set_canvas(self.canvas)
@@ -415,26 +448,6 @@ class DatasetReviewPage(QWidget):
             f"{annotation_text}  ·  保留 {self.accepted_count}  ·  移除 {self.removed_count}"
         )
 
-    def _take_current_item(self) -> tuple[ReviewItem | None, int]:
-        if self.current_index < 0 or self.current_index >= len(self.items):
-            return None, -1
-        index = self.current_index
-        item = self.items.pop(index)
-        self.file_list.blockSignals(True)
-        self.file_list.takeItem(index)
-        self.file_list.blockSignals(False)
-        self.current_index = -1
-        self.current_item = None
-        return item, index
-
-    def _restore_item(self, item: ReviewItem, index: int) -> None:
-        self.items.insert(index, item)
-        suffix = "" if item.has_annotation else "  [无标注]"
-        self.file_list.blockSignals(True)
-        self.file_list.insertItem(index, f"{item.image_path.name}{suffix}")
-        self.file_list.blockSignals(False)
-        self.jump_to_index(index)
-
     def _show_after_removal(self, index: int, message: str) -> None:
         if not self.items:
             self._clear_preview()
@@ -445,7 +458,7 @@ class DatasetReviewPage(QWidget):
         self.status_label.setText(message)
 
     def _clear_preview(self) -> None:
-        self.current_index = -1
+        self._session = clear_review_selection(self._session)
         self.current_item = None
         self.lbl_current_name.setText("未加载图片")
         self.lbl_label_state.setText("无")
@@ -461,36 +474,56 @@ class DatasetReviewPage(QWidget):
             QMessageBox.warning(self, "提示", "请先在数据源设置中选择保留目录。")
             self.source_panel.setVisible(True)
             return
-        item, index = self._take_current_item()
-        if item is None:
+        transition = plan_review_decision(
+            self._session,
+            "accepted",
+            self.spec.accepted_output,
+            decision="accept",
+        )
+        if transition is None:
             return
         try:
-            moved_image, moved_annotation = move_review_item(item, self.spec.accepted_output)
+            moved = execute_review_intents(transition.intents)
         except Exception as exc:
-            self._restore_item(item, index)
             QMessageBox.critical(self, "保留失败", str(exc))
             return
-        self.accepted_count += 1
-        names = [moved_image.name] + ([moved_annotation.name] if moved_annotation else [])
-        self._show_after_removal(index, f"已保留: {', '.join(names)}")
+        self.file_list.blockSignals(True)
+        self.file_list.takeItem(transition.removed_index)
+        self.file_list.blockSignals(False)
+        self._session = transition.session
+        self.current_item = None
+        self._show_after_removal(
+            transition.removed_index,
+            f"已保留: {', '.join(path.name for path in moved)}",
+        )
 
     def move_current_to_trash(self) -> None:
         if self.spec is None:
             return
-        item, index = self._take_current_item()
-        if item is None:
-            return
         if self.trash_dir is None:
             self.trash_dir = make_review_trash_dir(self.spec.trash_root or Path.cwd())
+        transition = plan_review_decision(
+            self._session,
+            "removed",
+            self.trash_dir,
+            decision="remove",
+        )
+        if transition is None:
+            return
         try:
-            moved_image, moved_annotation = move_review_item(item, self.trash_dir)
+            moved = execute_review_intents(transition.intents)
         except Exception as exc:
-            self._restore_item(item, index)
             QMessageBox.critical(self, "移除失败", str(exc))
             return
-        self.removed_count += 1
-        names = [moved_image.name] + ([moved_annotation.name] if moved_annotation else [])
-        self._show_after_removal(index, f"已移除: {', '.join(names)}")
+        self.file_list.blockSignals(True)
+        self.file_list.takeItem(transition.removed_index)
+        self.file_list.blockSignals(False)
+        self._session = transition.session
+        self.current_item = None
+        self._show_after_removal(
+            transition.removed_index,
+            f"已移除: {', '.join(path.name for path in moved)}",
+        )
 
     def current_result(self) -> ReviewResult | None:
         spec = self.spec or self._make_spec()

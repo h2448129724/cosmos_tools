@@ -15,11 +15,11 @@ import random
 import cv2
 import numpy as np
 import torch
-from scipy.ndimage import maximum_filter
 from torch.utils.data import DataLoader
 
 from .model_registry import DEFAULT_MODEL, get_model, model_choices
 from .datasets import KeypointDataset
+from .inference_core import apply_tta, combine_tta_heatmaps, decode_checkpoint, detect_peaks, tta_plan
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -197,37 +197,6 @@ def train(args, epoch_callback=None, stop_event=None):
 # ───────────────────────── Inference ──────────────────────
 
 
-def detect_peaks(heatmap, threshold=0.5, cluster_dist=3):
-    """Find local maxima, cluster nearby peaks, keep best per cluster."""
-    from scipy.cluster.hierarchy import fcluster, linkage
-
-    hm = heatmap.squeeze()
-    local_max = maximum_filter(hm, size=5)
-    peaks = (hm == local_max) & (hm > threshold)
-    ys, xs = np.where(peaks)
-    scores = hm[ys, xs]
-
-    if len(xs) == 0:
-        return []
-
-    if len(xs) == 1:
-        return [(xs[0].item(), ys[0].item(), scores[0].item())]
-
-    coords = np.stack([xs, ys], axis=1).astype(np.float64)
-    Z = linkage(coords, method="complete", metric="euclidean")
-    labels = fcluster(Z, t=cluster_dist, criterion="distance")
-
-    kept = []
-    for cid in np.unique(labels):
-        mask = labels == cid
-        idx = np.argmax(scores[mask])
-        idxs = np.where(mask)[0]
-        best = idxs[idx]
-        kept.append((xs[best].item(), ys[best].item(), scores[best].item()))
-
-    return kept
-
-
 def predict_heatmap_tta(model, img_np, device):
     """TTA: original + 3 flips + 3 rotations, average heatmaps."""
     h, w = img_np.shape[:2]
@@ -242,36 +211,14 @@ def predict_heatmap_tta(model, img_np, device):
             return model(tensor).cpu().numpy()[0, 0]
 
     heatmaps = []
-
-    # Original
-    heatmaps.append(infer(to_tensor(img_np)))
-
-    # Horizontal flip
-    flipped_h = img_np[:, ::-1, :].copy()
-    hm = infer(to_tensor(flipped_h))
-    heatmaps.append(hm[:, ::-1])
-
-    # Vertical flip
-    flipped_v = img_np[::-1, :, :].copy()
-    hm = infer(to_tensor(flipped_v))
-    heatmaps.append(hm[::-1, :])
-
-    # Both flips
-    flipped_hv = img_np[::-1, ::-1, :].copy()
-    hm = infer(to_tensor(flipped_hv))
-    heatmaps.append(hm[::-1, ::-1])
-
-    # 90/180/270 rotations
-    for k in [1, 2, 3]:
-        rot = np.rot90(img_np, k).copy()
-        rot_resized = cv2.resize(rot, (w, h))
-        hm = infer(to_tensor(rot_resized))
-        hm_resized = cv2.resize(hm, (w, h))
-        hm_back = np.rot90(hm_resized, 4 - k)
-        heatmaps.append(hm_back)
-
-    avg_hm = np.mean(heatmaps, axis=0)
-    return avg_hm[np.newaxis, ...]
+    plan = tta_plan(h, w)
+    for path in plan:
+        transformed = apply_tta(img_np, path).copy()
+        if path.model_shape != path.native_shape:
+            transformed = cv2.resize(transformed, (path.model_shape[1], path.model_shape[0]))
+        hm = infer(to_tensor(transformed))
+        heatmaps.append(hm)
+    return combine_tta_heatmaps(heatmaps, (h, w), plan=plan, resize_fn=cv2.resize)
 
 
 def predict(image_path, model_path=None, threshold=0.5, save_dir=None, model_name=DEFAULT_MODEL):
@@ -280,11 +227,9 @@ def predict(image_path, model_path=None, threshold=0.5, save_dir=None, model_nam
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-    if isinstance(checkpoint, dict) and "model_state" in checkpoint:
-        model_name = str(checkpoint.get("model_key") or model_name)
-        state = checkpoint["model_state"]
-    else:
-        state = checkpoint
+    decoded = decode_checkpoint(checkpoint, model_name)
+    model_name = decoded.model_name or model_name
+    state = decoded.state
     model = get_model(model_name).to(device)
     model.load_state_dict(state, strict=True)
     model.eval()

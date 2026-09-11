@@ -9,102 +9,43 @@ import torch
 
 from sew_point.inference import KeypointDetector
 
-from .batch_predict import build_edge_metrics
 from .datasets import (
     build_graph_sample,
     build_raw_predicted_point_annotation,
     collect_json_files,
     estimate_spacing,
     load_annotation,
-    match_points_by_geometry,
     read_image,
     resolve_image_path,
 )
-from .infer import apply_max_degree_constraint, resolve_postprocess_params
-from .model_registry import DEFAULT_MODEL, get_model
+from .evaluation_core import graph_metrics_from_matches, point_metrics, summarize_counts as core_summarize_counts
+from .runtime import TorchConnectorRuntime
 
 
 def compute_point_metrics(gt_annotation: dict, predicted_point_annotation: dict) -> dict:
-    gt_points = list(gt_annotation.get("points", []))
     predicted_points = [
         (float(point["x"]), float(point["y"]), float(point.get("score", 1.0)))
         for point in predicted_point_annotation.get("points", [])
     ]
-    _, matched_ids = match_points_by_geometry(gt_points, predicted_points)
-    matched = sum(1 for item in matched_ids if item is not None)
-    pred_points = list(predicted_point_annotation.get("points", []))
-    pred_count = len(pred_points)
-    gt_count = len(gt_points)
-    tp = matched
-    fp = max(pred_count - matched, 0)
-    fn = max(gt_count - matched, 0)
-    precision = tp / max(tp + fp, 1)
-    recall = tp / max(tp + fn, 1)
-    f1 = 2 * precision * recall / max(precision + recall, 1e-8)
-    return {
-        "gt_points": gt_count,
-        "pred_points": pred_count,
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        }
+    return point_metrics(gt_annotation.get("points", []), predicted_points)
 
 
 def build_graph_metrics_from_matches(gt_annotation: dict, predicted_edges: list[dict], predicted_point_annotation: dict) -> dict:
-    predicted_points = [
-        (float(point["x"]), float(point["y"]), float(point.get("score", 1.0)))
-        for point in predicted_point_annotation.get("points", [])
-    ]
-    _, matched_ids = match_points_by_geometry(gt_annotation.get("points", []), predicted_points)
-    point_id_to_gt_id = {
-        int(point.get("id", idx)): matched_ids[idx]
-        for idx, point in enumerate(predicted_point_annotation.get("points", []))
-    }
-
-    lifted_edges = []
-    seen_edges: set[tuple[int, int]] = set()
-    for edge in predicted_edges:
-        src_pred = int(edge["src"])
-        dst_pred = int(edge["dst"])
-        src_gt = point_id_to_gt_id.get(src_pred)
-        dst_gt = point_id_to_gt_id.get(dst_pred)
-        if src_gt is None or dst_gt is None or src_gt == dst_gt:
-            continue
-        norm_edge = tuple(sorted((int(src_gt), int(dst_gt))))
-        if norm_edge in seen_edges:
-            continue
-        seen_edges.add(norm_edge)
-        lifted_edges.append(
-            {
-                "src": norm_edge[0],
-                "dst": norm_edge[1],
-                "score": float(edge.get("score", 0.0)),
-            }
-        )
-
-    return build_edge_metrics(gt_annotation, lifted_edges)
+    return graph_metrics_from_matches(
+        gt_annotation.get("points", []),
+        gt_annotation.get("edges", []),
+        predicted_point_annotation.get("points", []),
+        predicted_edges,
+    )
 
 
 class EdgePredictor:
     def __init__(self, model_path: str):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.checkpoint = torch.load(model_path, map_location=self.device)
-        args = self.checkpoint.get("args", {})
-        self.threshold = float(self.checkpoint.get("threshold", 0.5))
-        self.args = args
-        self.model = get_model(
-            str(self.checkpoint.get("model_key") or args.get("model_name") or DEFAULT_MODEL),
-            node_dim=int(self.checkpoint["node_dim"]),
-            edge_dim=int(self.checkpoint["edge_dim"]),
-            hidden_dim=int(args.get("hidden_dim", 128)),
-            num_layers=int(args.get("num_layers", 3)),
-            dropout=float(args.get("dropout", 0.1)),
-        ).to(self.device)
-        self.model.load_state_dict(self.checkpoint["model_state"])
-        self.model.eval()
+        self.runtime = TorchConnectorRuntime(model_path)
+        self.device = self.runtime.device
+        self.checkpoint = self.runtime.checkpoint
+        self.threshold = self.runtime.threshold
+        self.args = self.runtime.args
 
     def predict_edges(
         self,
@@ -132,66 +73,21 @@ class EdgePredictor:
         )
         if sample is None:
             return []
-
         edge_threshold = self.threshold if threshold is None else float(threshold)
-        with torch.no_grad():
-            logits = self.model(
-                sample.node_x.to(self.device),
-                sample.edge_index.to(self.device),
-                sample.edge_attr.to(self.device),
-                sample.edge_patch.to(self.device),
-            )
-            probs = torch.sigmoid(logits).cpu().numpy()
-
-        predicted_edges = []
-        edge_index = sample.edge_index.t().cpu().numpy()
-        for idx, (src, dst) in enumerate(edge_index):
-            score = float(probs[idx])
-            if score < edge_threshold:
-                continue
-            predicted_edges.append(
-                {
-                    "edge_id": f"pred_edge_{len(predicted_edges) + 1:04d}",
-                    "src": int(sample.point_ids[int(src)]),
-                    "dst": int(sample.point_ids[int(dst)]),
-                    "score": score,
-                    "label": 1,
-                    "source": "gnn_predict",
-                }
-            )
-        point_xy = {
-            int(point.get("id", idx)): (float(point["x"]), float(point["y"]))
-            for idx, point in enumerate(annotation.get("points", []))
-        }
-        params = resolve_postprocess_params(
-            preset=postprocess_preset,
+        return self.runtime.predict_edges(
+            sample,
+            annotation,
+            threshold=edge_threshold,
+            postprocess_preset=postprocess_preset,
             max_degree=max_degree,
             max_small_cycle_length=max_small_cycle_length,
             continuity_weight=continuity_weight,
             cycle_penalty=cycle_penalty,
         )
-        return apply_max_degree_constraint(
-            predicted_edges,
-            point_xy=point_xy,
-            max_degree=params["max_degree"],
-            max_small_cycle_length=params["max_small_cycle_length"],
-            continuity_weight=params["continuity_weight"],
-            cycle_penalty=params["cycle_penalty"],
-        )
 
 
 def summarize_counts(tp: int, fp: int, fn: int) -> dict:
-    precision = tp / max(tp + fp, 1)
-    recall = tp / max(tp + fn, 1)
-    f1 = 2 * precision * recall / max(precision + recall, 1e-8)
-    return {
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
+    return core_summarize_counts(tp, fp, fn)
 
 
 def save_csv(path: Path, rows: list[dict]) -> None:

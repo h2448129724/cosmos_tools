@@ -21,8 +21,11 @@ from PySide6.QtCore import QCoreApplication  # noqa: E402
 from PySide6.QtGui import QFont, QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from cosmos_toolbox.paths import TOOLBOX_ROOT, ensure_import_paths  # noqa: E402
+
+ensure_import_paths()
+
 from cosmos_toolbox.app import ToolboxWindow  # noqa: E402
-from cosmos_toolbox.paths import TOOLBOX_ROOT  # noqa: E402
 from cosmos_toolbox.project_context import ProjectContext  # noqa: E402
 
 

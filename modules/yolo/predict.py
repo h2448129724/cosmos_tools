@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .action_plan import YoloActionPlan
+
 
 TASK_CHOICES = ["detect", "segment", "classify", "pose"]
 
@@ -60,6 +62,22 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    plan = YoloActionPlan(
+        "predict",
+        task=args.task,
+        model=args.model,
+        source=source_path,
+        imgsz=args.imgsz,
+        conf=args.conf,
+        iou=args.iou,
+        device=args.device,
+        save=args.save,
+        save_txt=args.save_txt,
+        save_conf=args.save_conf,
+        save_crop=args.save_crop,
+        output_dir=output_dir,
+    )
+
     print("=" * 60)
     print(f"YOLO task      : {args.task}")
     print(f"YOLO model     : {model_path}")
@@ -71,23 +89,7 @@ def main() -> None:
     print("=" * 60)
 
     model = YOLO(str(model_path))
-    predict_kwargs = {
-        "source": str(source_path),
-        "task": args.task,
-        "imgsz": args.imgsz,
-        "conf": args.conf,
-        "iou": args.iou,
-        "project": str(output_dir.parent),
-        "name": output_dir.name,
-        "save": args.save,
-        "save_txt": args.save_txt,
-        "save_conf": args.save_conf,
-        "save_crop": args.save_crop,
-    }
-    if args.device is not None:
-        predict_kwargs["device"] = args.device
-
-    results = model.predict(**predict_kwargs)
+    results = model.predict(**plan.predict_kwargs())
 
     print("-" * 60)
     print(f"Prediction complete. {len(results)} image(s) processed.")

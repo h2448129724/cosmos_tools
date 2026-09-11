@@ -9,7 +9,9 @@ import cv2
 import numpy as np
 
 from .datasets import collect_json_files, load_annotation
-from .infer import POSTPROCESS_PRESETS, apply_max_degree_constraint, resolve_postprocess_params
+from .infer import POSTPROCESS_PRESETS, resolve_postprocess_params
+from .runtime import TorchConnectorRuntime
+from .evaluation_core import compare_edges, edge_metrics, normalize_edges, summarize_counts
 # cabf is imported lazily inside the functions that need it so this entry point
 # stays importable without cabf on the path (direct `python -m` execution),
 # matching sew_point.utils. cabf is on path in every real run — trainer_gui
@@ -120,38 +122,12 @@ def normalize_points(annotation: dict) -> dict[int, tuple[int, int]]:
 
 
 def normalize_edge_set(edges: list[dict]) -> set[tuple[int, int]]:
-    edge_set: set[tuple[int, int]] = set()
-    for edge in edges:
-        try:
-            src = int(edge["src"])
-            dst = int(edge["dst"])
-        except Exception:
-            continue
-        if src == dst:
-            continue
-        edge_set.add(tuple(sorted((src, dst))))
-    return edge_set
+    """Compatibility wrapper around the pure edge normalizer."""
+    return set(normalize_edges(edges))
 
 
 def build_edge_metrics(annotation: dict, predicted_edges: list[dict]) -> dict:
-    pred_edges = normalize_edge_set(predicted_edges)
-    gt_edges = normalize_edge_set(annotation.get("edges", []))
-    tp = len(pred_edges & gt_edges)
-    fp = len(pred_edges - gt_edges)
-    fn = len(gt_edges - pred_edges)
-    precision = tp / max(tp + fp, 1)
-    recall = tp / max(tp + fn, 1)
-    f1 = 2 * precision * recall / max(precision + recall, 1e-8)
-    return {
-        "gt_edges": len(gt_edges),
-        "pred_edges": len(pred_edges),
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
+    return edge_metrics(annotation.get("edges", []), predicted_edges)
 
 
 def save_metrics_csv(path: Path, rows: list[dict]):
@@ -180,17 +156,16 @@ def save_metrics_csv(path: Path, rows: list[dict]):
 def draw_visualization(image: np.ndarray, annotation: dict, predicted_edges: list[dict], compare_with_gt: bool = True) -> np.ndarray:
     vis = image.copy()
     point_map = normalize_points(annotation)
-    pred_edges = normalize_edge_set(predicted_edges)
-    gt_edges = normalize_edge_set(annotation.get("edges", [])) if compare_with_gt else set()
+    comparison = compare_edges(
+        annotation.get("edges", []) if compare_with_gt else (),
+        predicted_edges,
+    )
 
-    if gt_edges:
-        tp_edges = pred_edges & gt_edges
-        fp_edges = pred_edges - gt_edges
-        fn_edges = gt_edges - pred_edges
+    if comparison.ground_truth:
         edge_groups = [
-            (fn_edges, (255, 0, 0), 2),
-            (fp_edges, (0, 0, 255), 2),
-            (tp_edges, (0, 220, 255), 3),
+            (comparison.false_negative, (255, 0, 0), 2),
+            (comparison.false_positive, (0, 0, 255), 2),
+            (comparison.true_positive, (0, 220, 255), 3),
         ]
         legend = [
             ("GT only (FN)", (255, 0, 0)),
@@ -198,7 +173,7 @@ def draw_visualization(image: np.ndarray, annotation: dict, predicted_edges: lis
             ("Pred & GT (TP)", (0, 220, 255)),
         ]
     else:
-        edge_groups = [(pred_edges, (0, 220, 255), 2)]
+        edge_groups = [(comparison.predicted, (0, 220, 255), 2)]
         legend = [("Pred edges", (0, 220, 255))]
 
     for edge_set, color, thickness in edge_groups:
@@ -263,6 +238,9 @@ def batch_predict(
         "fn": 0,
     }
     metrics_rows: list[dict] = []
+    # Construct lazily so a directory containing only empty annotations keeps
+    # the historical behavior of not loading a checkpoint at all.
+    runtime: TorchConnectorRuntime | None = None
 
     for json_file in json_files:
         json_path = Path(json_file)
@@ -272,6 +250,9 @@ def batch_predict(
             if len(annotation.get("points", [])) < 2:
                 summary["skipped_empty_points"] += 1
                 continue
+
+            if runtime is None:
+                runtime = TorchConnectorRuntime(model_path)
 
             temp_input = dict(annotation)
             predicted_edges = predict_edges_from_annotation(
@@ -284,6 +265,8 @@ def batch_predict(
                 max_small_cycle_length=postprocess_params["max_small_cycle_length"],
                 continuity_weight=postprocess_params["continuity_weight"],
                 cycle_penalty=postprocess_params["cycle_penalty"],
+                runtime=runtime,
+                point_xy=normalize_points(annotation),
             )
             output_annotation = dict(annotation)
             output_annotation["predicted_edges"] = predicted_edges
@@ -338,9 +321,7 @@ def batch_predict(
             print(f"[ERROR] {json_path.name}: {exc}")
 
     if compare_with_gt and summary["evaluated_samples"] > 0:
-        summary["precision"] = summary["tp"] / max(summary["tp"] + summary["fp"], 1)
-        summary["recall"] = summary["tp"] / max(summary["tp"] + summary["fn"], 1)
-        summary["f1"] = 2 * summary["precision"] * summary["recall"] / max(summary["precision"] + summary["recall"], 1e-8)
+        summary.update(summarize_counts(summary["tp"], summary["fp"], summary["fn"]))
         save_metrics_csv(output_dir / "metrics.csv", metrics_rows)
         save_json(output_dir / "metrics_summary.json", summary)
 
@@ -358,15 +339,12 @@ def predict_edges_from_annotation(
     max_small_cycle_length: int | None = None,
     continuity_weight: float | None = None,
     cycle_penalty: float | None = None,
+    runtime: TorchConnectorRuntime | None = None,
+    point_xy: dict[int, tuple[int, int]] | None = None,
 ):
     from .datasets import build_graph_sample
-    import torch
-    from .model_registry import DEFAULT_MODEL, get_model
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(model_path, map_location=device)
-    threshold = float(checkpoint.get("threshold", 0.5) if threshold is None else threshold)
-    args = checkpoint.get("args", {})
+    runtime = runtime or TorchConnectorRuntime(model_path)
+    args = runtime.args
     sample = build_graph_sample(
         annotation=annotation,
         json_path=json_path,
@@ -380,59 +358,16 @@ def predict_edges_from_annotation(
     )
     if sample is None:
         return []
-
-    model = get_model(
-        str(checkpoint.get("model_key") or args.get("model_name") or DEFAULT_MODEL),
-        node_dim=int(checkpoint["node_dim"]),
-        edge_dim=int(checkpoint["edge_dim"]),
-        hidden_dim=int(args.get("hidden_dim", 128)),
-        num_layers=int(args.get("num_layers", 3)),
-        dropout=float(args.get("dropout", 0.1)),
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state"])
-    model.eval()
-    print(f"[INFO] 连线推理设备: {device}")
-
-    with torch.no_grad():
-        node_x = sample.node_x.to(device)
-        edge_index = sample.edge_index.to(device)
-        edge_attr = sample.edge_attr.to(device)
-        edge_patch = sample.edge_patch.to(device)
-        logits = model(node_x, edge_index, edge_attr, edge_patch)
-        probs = torch.sigmoid(logits).cpu().numpy()
-
-    predicted_edges = []
-    edge_index = sample.edge_index.t().cpu().numpy()
-    for idx, (src, dst) in enumerate(edge_index):
-        score = float(probs[idx])
-        if score >= threshold:
-            src_id = int(sample.point_ids[int(src)])
-            dst_id = int(sample.point_ids[int(dst)])
-            predicted_edges.append(
-                {
-                    "edge_id": f"pred_edge_{len(predicted_edges) + 1:04d}",
-                    "src": src_id,
-                    "dst": dst_id,
-                    "score": score,
-                    "label": 1,
-                    "source": "gnn_predict",
-                }
-            )
-    point_xy = normalize_points(annotation)
-    params = resolve_postprocess_params(
-        preset="balanced",
+    print(f"[INFO] 连线推理设备: {runtime.device}")
+    return runtime.predict_edges(
+        sample,
+        annotation,
+        threshold=threshold,
         max_degree=max_degree,
         max_small_cycle_length=max_small_cycle_length,
         continuity_weight=continuity_weight,
         cycle_penalty=cycle_penalty,
-    )
-    return apply_max_degree_constraint(
-        predicted_edges,
-        point_xy=point_xy,
-        max_degree=params["max_degree"],
-        max_small_cycle_length=params["max_small_cycle_length"],
-        continuity_weight=params["continuity_weight"],
-        cycle_penalty=params["cycle_penalty"],
+        point_xy=normalize_points(annotation) if point_xy is None else point_xy,
     )
 
 

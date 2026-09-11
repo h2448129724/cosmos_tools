@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 from apps.data_tools.processing.image_io import read_image
 from apps.data_tools.processing.auto_tile_crop import compute_tile_grid, batch_tile_crop
 from ..preview_widget import ZoomableLabel, cv2_to_qpixmap
-from .base import BaseToolPage, FuncWorker, make_card, make_log_box, make_log_card, make_page_header, set_primary
+from cosmos_toolbox.ui import ActionBar, PageScaffold, PathField, SectionSurface, StatusBanner
+from .base import BaseToolPage, make_log_box, make_log_card, set_primary
 
 
 class AutoTileCropPage(BaseToolPage):
@@ -36,84 +37,67 @@ class AutoTileCropPage(BaseToolPage):
         self._build_ui()
 
     def _build_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
-
-        lay.addWidget(make_page_header("自动裁剪", "按固定尺寸自动切割成多个小块。"))
-
-        settings_card = make_card()
-        settings_lay = QVBoxLayout(settings_card)
-        settings_lay.setContentsMargins(18, 16, 18, 16)
-        settings_lay.setSpacing(10)
-
-        self._in_entry, r1 = self._dir_row("输入目录")
-        self._out_entry, r2 = self._dir_row("输出目录")
-        settings_lay.addLayout(r1)
-        settings_lay.addLayout(r2)
+        scaffold = PageScaffold("自动裁剪", "按固定尺寸自动切割成多个小块。")
+        QVBoxLayout(self).addWidget(scaffold)
+        lay = scaffold.content_layout
+        settings_card = SectionSurface("输入与输出", "选择目录、切块尺寸和边缘处理方式。")
+        settings_lay = settings_card.body_layout
+        input_field = PathField("输入目录", placeholder="选择输入目录", browse_text="浏览")
+        output_field = PathField("输出目录", placeholder="选择输出目录", browse_text="浏览")
+        input_field.browse_requested.connect(lambda: self._pick_dir(input_field.line_edit))
+        output_field.browse_requested.connect(lambda: self._pick_dir(output_field.line_edit))
+        self._in_entry, self._out_entry = input_field.line_edit, output_field.line_edit
+        settings_lay.addWidget(input_field)
+        settings_lay.addWidget(output_field)
 
         size_row = QHBoxLayout()
         size_row.setSpacing(8)
         size_row.addWidget(QLabel("宽度"))
         self._spin_w = QSpinBox()
+        self._spin_w.setAccessibleName("切块宽度")
         self._spin_w.setRange(16, 8192)
         self._spin_w.setValue(256)
         self._spin_w.setSuffix(" px")
         size_row.addWidget(self._spin_w)
         size_row.addWidget(QLabel("高度"))
         self._spin_h = QSpinBox()
+        self._spin_h.setAccessibleName("切块高度")
         self._spin_h.setRange(16, 8192)
         self._spin_h.setValue(256)
         self._spin_h.setSuffix(" px")
         size_row.addWidget(self._spin_h)
         self._cb_overlap = QCheckBox("允许重叠补边（小图补黑，保持固定切块尺寸）")
+        self._cb_overlap.setAccessibleName("允许重叠补边")
         self._cb_overlap.setChecked(True)
         size_row.addWidget(self._cb_overlap)
         size_row.addStretch(1)
         settings_lay.addLayout(size_row)
         lay.addWidget(settings_card)
 
-        work_card = make_card()
-        card_lay = QVBoxLayout(work_card)
-        card_lay.setContentsMargins(18, 16, 18, 16)
-        card_lay.setSpacing(10)
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(8)
+        work_card = SectionSurface("预览与执行", "先加载首张图片确认切块网格，再执行批量裁剪。")
+        card_lay = work_card.body_layout
+        preview_row = ActionBar()
         b_preview = QPushButton("加载预览")
         b_preview.clicked.connect(self._preview)
         b_run = QPushButton("执行裁剪")
         set_primary(b_run)
         b_run.clicked.connect(self._run)
-        preview_row.addWidget(b_preview)
-        preview_row.addWidget(b_run)
-        preview_row.addStretch(1)
-        card_lay.addLayout(preview_row)
+        preview_row.add_widget(b_preview)
+        preview_row.add_widget(b_run)
+        card_lay.addWidget(preview_row)
 
         self._preview_label = ZoomableLabel()
+        self._preview_label.setAccessibleName("自动裁剪预览")
         self._preview_label.setMinimumHeight(240)
         self._preview_label.setMaximumHeight(360)
         card_lay.addWidget(self._preview_label, 1)
-        self._info_label = QLabel("")
-        self._info_label.setStyleSheet("color:#64748b;")
-        card_lay.addWidget(self._info_label)
+        self._info_banner = StatusBanner("")
+        self._info_label = self._info_banner.label
+        card_lay.addWidget(self._info_banner)
         lay.addWidget(work_card, 1)
 
         self._log = make_log_box("运行日志...")
         lay.addWidget(make_log_card(self._log))
-
-    def _dir_row(self, label: str) -> tuple:
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        lbl = QLabel(label)
-        lbl.setFixedWidth(88)
-        row.addWidget(lbl)
-        entry = QLineEdit()
-        row.addWidget(entry, 1)
-        btn = QPushButton("浏览")
-        btn.setFixedWidth(72)
-        btn.clicked.connect(lambda: self._pick_dir(entry))
-        row.addWidget(btn)
-        return entry, row
 
     def _pick_dir(self, entry: QLineEdit):
         d = QFileDialog.getExistingDirectory(self._mw, "选择目录", entry.text() or ".")
@@ -155,6 +139,8 @@ class AutoTileCropPage(BaseToolPage):
         )
 
     def _run(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
         input_dir = self._in_entry.text().strip()
         output_dir = self._out_entry.text().strip()
         tile_w = self._spin_w.value()
@@ -169,9 +155,15 @@ class AutoTileCropPage(BaseToolPage):
         overlap_text = "重叠补边，小图补黑" if self._cb_overlap.isChecked() else "丢弃不足尺寸的边缘块"
         self._log.appendPlainText(f"开始裁剪: {tile_w}×{tile_h}，模式：{overlap_text}")
         self._info_label.setText(f"准备执行：切块尺寸 {tile_w} x {tile_h}，模式：{overlap_text}")
-        self._worker = FuncWorker(batch_tile_crop, input_dir, output_dir, tile_w, tile_h, self._cb_overlap.isChecked())
-        self._worker.finished.connect(self._on_done)
-        self._worker.start()
+        self.run_background(
+            batch_tile_crop,
+            input_dir,
+            output_dir,
+            tile_w,
+            tile_h,
+            self._cb_overlap.isChecked(),
+            on_result=self._on_done,
+        )
 
     def _on_done(self, result):
         if isinstance(result, Exception):

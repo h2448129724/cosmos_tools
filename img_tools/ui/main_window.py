@@ -54,6 +54,17 @@ from img_tools.core.transform import BatchTransformResult, batch_transform, tran
 from img_tools.ui.canvas import ImageCanvas
 
 
+def workspace_page(parent: QWidget | None = None) -> QWidget:
+    """Return the native embedded image page without creating ``MainWindow``.
+
+    Kept next to the legacy launcher as an explicit migration seam so callers
+    do not accidentally embed a ``QMainWindow`` in the project workbench.
+    """
+    from img_tools.ui.workspace_page import workspace_page as create_page
+
+    return create_page(parent)
+
+
 class TaskWorker(QThread):
     """Shared cooperative-cancellation worker contract for every batch task."""
     progressChanged = Signal(int, int)
@@ -189,6 +200,11 @@ class MainWindow(QMainWindow):
         self._workspace_key = workspace_key
         self._set_embedded_mode(True)
 
+    @staticmethod
+    def workspace_page(parent: QWidget | None = None) -> QWidget:
+        """Compatibility entry point for the embeddable image surface."""
+        return workspace_page(parent)
+
     def _set_embedded_mode(self, embedded: bool) -> None:
         self._embedded_mode = embedded
         for dock in self._workspace_docks():
@@ -315,7 +331,7 @@ class MainWindow(QMainWindow):
         transform_tool = QPushButton("基础处理")
         transform_tool.clicked.connect(self._show_transform_tool)
         toolbar.addWidget(transform_tool)
-        toolbar.addWidget(QLabel("滚轮缩放 · 中键平移 · 单击取起点 · 拖拽创建 ROI"))
+        toolbar.addWidget(QLabel("滚轮缩放 · 中键平移 · 拖拽创建 ROI · 框内拖动 ROI"))
         toolbar.addStretch()
         layout.addLayout(toolbar)
         self.canvas = ImageCanvas()
@@ -323,6 +339,7 @@ class MainWindow(QMainWindow):
         self.canvas.coordinateClicked.connect(self._copy_coordinate)
         self.canvas.pointSelected.connect(self._set_origin_from_canvas)
         self.canvas.roiDrawn.connect(self._add_drawn_roi)
+        self.canvas.roiMoved.connect(self._move_roi)
         layout.addWidget(self.canvas, 1)
         self.image_info = QLabel("未打开图片")
         self.image_info.setStyleSheet("color:#667085")
@@ -344,6 +361,11 @@ class MainWindow(QMainWindow):
         form.addRow("宽度", self.width_box)
         form.addRow("高度", self.height_box)
         layout.addLayout(form)
+        self.fixed_size_check = QCheckBox("固定尺寸（画布拖动只改变位置）")
+        self.fixed_size_check.toggled.connect(self._sync_fixed_roi_size)
+        self.width_box.valueChanged.connect(self._sync_fixed_roi_size)
+        self.height_box.valueChanged.connect(self._sync_fixed_roi_size)
+        layout.addWidget(self.fixed_size_check)
         self.roi_feedback = QLabel("终点：X2=100，Y2=100")
         self.roi_feedback.setStyleSheet("color:#0984e3")
         layout.addWidget(self.roi_feedback)
@@ -807,6 +829,23 @@ class MainWindow(QMainWindow):
         self.height_box.setValue(roi.height)
         self._syncing = False
         self._add_or_update_roi()
+
+    def _move_roi(self, index: int, roi: Roi) -> None:
+        if not 0 <= index < len(self._rois):
+            return
+        self._rois[index] = roi
+        self._syncing = True
+        self.x_box.setValue(roi.x)
+        self.y_box.setValue(roi.y)
+        self.width_box.setValue(roi.width)
+        self.height_box.setValue(roi.height)
+        self._syncing = False
+        self._refresh_roi_list(index)
+        self.status.showMessage(f"已移动 {roi.name} 到 ({roi.x}, {roi.y})。", 3000)
+
+    def _sync_fixed_roi_size(self, *_args) -> None:
+        size = (self.width_box.value(), self.height_box.value()) if self.fixed_size_check.isChecked() else None
+        self.canvas.set_fixed_roi_size(size)
 
     def _add_or_update_roi(self, *, update: bool = False) -> None:
         selected = self.roi_list.currentRow()

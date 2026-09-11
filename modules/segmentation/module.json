@@ -1,7 +1,7 @@
 {
   "feature_name": "segmentation",
   "display_name": "Segmentation",
-  "description": "分割模型相关功能，按训练、单图推理、批量自动标注拆分为独立子功能。",
+  "description": "分割模型相关功能，按训练、ONNX 导出、单图推理、批量自动标注拆分为独立子功能。",
   "preferred_conda_env": "onnx-gpu",
   "default_project_name": "default",
   "actions": [
@@ -74,6 +74,78 @@
           "label": "输出目录",
           "widget": "path",
           "default": ""
+        }
+      }
+    },
+    {
+      "action_name": "export_onnx",
+      "display_name": "导出 ONNX",
+      "description": "从 Segmentation checkpoint 导出动态尺寸 ONNX，并执行结构检查和 PyTorch/ONNX 数值一致性验证。",
+      "entry": {
+        "type": "module",
+        "value": "segmentation.tools.export_onnx"
+      },
+      "output": {
+        "arg_name": "onnx_out",
+        "use_artifacts_subdir": true,
+        "default_file_name": "segmentation.onnx"
+      },
+      "ui": {
+        "field_order": [
+          "checkpoint",
+          "test_image",
+          "onnx_out",
+          "model_name",
+          "n_classes",
+          "input_size",
+          "opset",
+          "device",
+          "max_abs_diff"
+        ]
+      },
+      "field_overrides": {
+        "checkpoint": {
+          "label": "训练权重",
+          "widget": "path",
+          "path_mode": "open_file",
+          "placeholder": "选择 .pth/.pt/.ckpt 权重"
+        },
+        "test_image": {
+          "label": "测试图片（可选）",
+          "widget": "path",
+          "path_mode": "open_file",
+          "placeholder": "选择一张真实图片进行导出后数值验证",
+          "help": "图片会缩放到验证尺寸，仅用于比较 PyTorch 与 ONNX 输出，不会限制模型的动态输入尺寸。"
+        },
+        "onnx_out": {
+          "label": "ONNX 输出路径",
+          "widget": "path",
+          "path_mode": "save_file",
+          "default": ""
+        },
+        "model_name": {
+          "label": "模型结构",
+          "widget": "select",
+          "choices": ["microunet", "microunet_gn"]
+        },
+        "n_classes": {
+          "label": "输出通道数",
+          "help": "二分类模型填写 2；多标签模型填写训练标签数量。"
+        },
+        "input_size": {
+          "label": "验证尺寸",
+          "help": "仅用于导出与一致性验证；生成的 ONNX 支持能被 4 整除的动态高宽。"
+        },
+        "opset": {
+          "label": "ONNX Opset"
+        },
+        "device": {
+          "label": "导出设备",
+          "widget": "select",
+          "choices": ["auto", "cpu", "cuda"]
+        },
+        "max_abs_diff": {
+          "label": "最大允许误差"
         }
       }
     },

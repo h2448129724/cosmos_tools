@@ -24,7 +24,7 @@ def _prepend(paths: tuple[Path, ...]) -> None:
 def ensure_module_paths(script_file: str) -> None:
     """Make a module tool runnable directly.
 
-    Adds the ``modules/`` root (so package imports such as
+    Adds the toolbox root (so ``cosmos_toolbox`` resolves), the ``modules/`` root (so package imports such as
     ``from segmentation.X`` / ``from sew_point.X`` resolve) and
     ``shared/cabf_common`` (so ``import cabf`` resolves).
     """
@@ -32,4 +32,4 @@ def ensure_module_paths(script_file: str) -> None:
     modules_root = file_path.parents[2]
     repo_root = file_path.parents[3]
     shared_cabf_root = repo_root / "shared" / "cabf_common"
-    _prepend((modules_root, shared_cabf_root))
+    _prepend((repo_root, modules_root, shared_cabf_root))

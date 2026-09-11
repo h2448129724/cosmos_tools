@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from .capabilities import CapabilityCatalog, STAGE_TITLES
 from .project_context import ProjectState
 from .project_session import ProjectArtifact
+from .layout_presentation import LayoutPresentation
 from shared.conda_runtime import CondaEnvInfo
 
 
@@ -36,7 +37,9 @@ class NavigationRail(QFrame):
         self.catalog = catalog
         self._keys: list[str] = []
         self._buttons: list[QPushButton] = []
+        self._headings: list[QLabel] = []
         self._current_index = -1
+        self._compact = False
         self.setObjectName("navigationRail")
         self.setMinimumWidth(188)
         self.setMaximumWidth(228)
@@ -44,12 +47,12 @@ class NavigationRail(QFrame):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 16, 12, 14)
         outer.setSpacing(8)
-        brand = QLabel("COSMOS")
-        brand.setObjectName("navigationBrand")
-        outer.addWidget(brand)
-        subtitle = QLabel("个人项目工作台")
-        subtitle.setObjectName("navigationSubtitle")
-        outer.addWidget(subtitle)
+        self.brand = QLabel("COSMOS")
+        self.brand.setObjectName("navigationBrand")
+        outer.addWidget(self.brand)
+        self.subtitle = QLabel("个人项目工作台")
+        self.subtitle.setObjectName("navigationSubtitle")
+        outer.addWidget(self.subtitle)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -66,20 +69,54 @@ class NavigationRail(QFrame):
         for stage, capabilities in catalog.grouped():
             heading = QLabel(STAGE_TITLES[stage])
             heading.setObjectName("navigationSection")
+            self._headings.append(heading)
             self.content_layout.addWidget(heading)
             for capability in capabilities:
                 self._add_capability(capability.key, capability.title)
             self.content_layout.addSpacing(8)
         self.content_layout.addStretch(1)
 
-        runtime_label = QLabel("Conda 环境")
-        runtime_label.setObjectName("runtimeLabel")
-        outer.addWidget(runtime_label)
+        self.runtime_label = QLabel("Conda 环境")
+        self.runtime_label.setObjectName("runtimeLabel")
+        outer.addWidget(self.runtime_label)
         self.runtime_combo = QComboBox()
         self.runtime_combo.setObjectName("runtimeSelector")
         self.runtime_combo.setToolTip("只影响之后启动的训练、推理和处理任务；不会重启当前界面")
         self.runtime_combo.currentIndexChanged.connect(self._emit_runtime_profile)
         outer.addWidget(self.runtime_combo)
+
+    @property
+    def is_compact(self) -> bool:
+        return self._compact
+
+    def set_compact(self, compact: bool) -> None:
+        compact = bool(compact)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        if compact:
+            self.setMinimumWidth(64)
+            self.setMaximumWidth(64)
+            self.brand.setText("C")
+            self.brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.subtitle.hide()
+            self.runtime_label.hide()
+            self.runtime_combo.hide()
+        else:
+            self.setMinimumWidth(188)
+            self.setMaximumWidth(228)
+            self.brand.setText("COSMOS")
+            self.brand.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.subtitle.show()
+            self.runtime_label.show()
+            self.runtime_combo.show()
+        for heading in self._headings:
+            heading.setVisible(not compact)
+        for button in self._buttons:
+            title = str(button.property("fullTitle") or button.text())
+            button.setText(title[:2] if compact else title)
+            button.setToolTip(title)
+            button.setAccessibleName(title)
 
     def set_runtime_environments(self, environments: list[CondaEnvInfo], selected_name: str) -> None:
         blocked = self.runtime_combo.blockSignals(True)
@@ -118,6 +155,8 @@ class NavigationRail(QFrame):
         button.setObjectName("navigationItem")
         button.setCheckable(True)
         button.setProperty("navItem", True)
+        button.setProperty("fullTitle", title)
+        button.setAccessibleName(title)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(lambda checked=False, row=index: self.setCurrentIndex(row))
         self._keys.append(key)
@@ -226,6 +265,17 @@ class ActivityHost(QFrame):
     def set_nested(self, nested: bool) -> None:
         self.header.setVisible(not nested)
 
+    def apply_layout(self, presentation: LayoutPresentation) -> None:
+        layout = self.layout()
+        layout.setContentsMargins(
+            presentation.page_margin,
+            presentation.page_margin,
+            presentation.page_margin,
+            max(10, presentation.page_margin - 4),
+        )
+        layout.setSpacing(presentation.page_spacing)
+        self.setProperty("density", presentation.density.value)
+
 
 class ProjectInspector(QFrame):
     dataset_requested = Signal()
@@ -329,3 +379,54 @@ class ProjectInspector(QFrame):
             item = QListWidgetItem(f"{artifact.name}\n{artifact.kind.value} · {Path(artifact.path).name}")
             item.setToolTip(artifact.path)
             self.artifact_list.addItem(item)
+
+    def apply_layout(self, presentation: LayoutPresentation) -> None:
+        mode = "overlay" if presentation.inspector_overlay else "docked"
+        self.setProperty("presentationMode", mode)
+        if presentation.inspector_overlay:
+            self.setMinimumWidth(260)
+            self.setMaximumWidth(300)
+        else:
+            self.setMinimumWidth(286)
+            self.setMaximumWidth(360)
+
+
+class TaskStatusStrip(QFrame):
+    """Persistent compact projection of the shared task ledger."""
+
+    open_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("taskStatusStrip")
+        self.setAccessibleName("运行任务摘要")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 7, 16, 7)
+        layout.setSpacing(10)
+        self.title = QLabel("任务")
+        self.title.setObjectName("taskStatusTitle")
+        layout.addWidget(self.title)
+        self.summary = QLabel()
+        self.summary.setObjectName("taskStatusSummary")
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary, 1)
+        self.open_button = QPushButton("查看任务")
+        self.open_button.setProperty("buttonRole", "ghost")
+        self.open_button.setAccessibleName("打开任务中心")
+        self.open_button.clicked.connect(self.open_requested)
+        layout.addWidget(self.open_button)
+        self.hide()
+
+    def apply_presentations(self, presentations: tuple[object, ...]) -> None:
+        # ``TaskPresentation.active`` is the single status projection.  This
+        # shell must not duplicate the ledger's status set or vocabulary.
+        active = [item for item in presentations if bool(getattr(item, "active", False))]
+        if not presentations:
+            self.hide()
+            return
+        latest = active[0] if active else presentations[0]
+        count = len(active)
+        self.title.setText(f"运行任务 {count}" if active else "最近任务")
+        self.summary.setText(str(getattr(latest, "summary", "")))
+        self.setAccessibleDescription(self.summary.text())
+        self.show()

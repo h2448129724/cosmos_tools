@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import shutil
 from pathlib import Path
+
+from ..action_plan import YoloActionPlan
 #  python -m yolo.scripts.export_onnx yolo/PullTail/runs/pulltail_yolo11n-2/weights/best.pt --output yolo/PullTail/runs/pulltail_yolo11n-2/weights/best.onnx
 
 def parse_args() -> argparse.Namespace:
@@ -48,21 +50,22 @@ def main() -> None:
 
     model = YOLO(str(model_path))
 
-    export_kwargs = {
-        "format": "onnx",
-        "imgsz": args.imgsz,
-        "opset": args.opset,
-        "simplify": args.simplify,
-        "dynamic": args.dynamic,
-        "half": args.half,
-    }
-    if args.device is not None:
-        export_kwargs["device"] = args.device
+    plan = YoloActionPlan(
+        "export_onnx",
+        model=model_path,
+        imgsz=args.imgsz,
+        opset=args.opset,
+        simplify=args.simplify,
+        dynamic=args.dynamic,
+        half=args.half,
+        device=args.device,
+        output=args.output,
+    )
+    result = model.export(**plan.export_kwargs())
 
-    result = model.export(**export_kwargs)
-
-    if args.output is not None:
-        out_path = args.output.resolve()
+    intent = plan.materialization_intent()
+    if intent.move_result and intent.target is not None:
+        out_path = intent.target.resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         move_export_result(result, out_path)
         print(f"Exported ONNX model to: {out_path}")

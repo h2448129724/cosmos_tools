@@ -15,19 +15,27 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QDoubleSpinBox,
     QSizePolicy,
-    QSplitter,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
 from .autosave import AutoSaveStatusController
+from .annotation.editor_shell import AnnotationEditorShell
+from cosmos_toolbox.ui.primitives import ActionBar
+from .annotation.commands import (
+    AddPoint,
+    AnnotationState,
+    DeletePoint,
+    MovePoint,
+    apply_edit,
+    next_point_id,
+)
 from cabf import make_empty_master_annotation, normalize_points_for_editor, read_image_bgr, write_json
 
 
@@ -173,15 +181,15 @@ class PointCanvas(QWidget):
         return self.points[idx]
 
     def _next_point_id(self) -> int:
-        if not self.points:
-            return 0
-        return max(int(point["id"]) for point in self.points) + 1
+        return next_point_id(self.points)
 
     def delete_selected_point(self):
         if self.selected_point_id is None:
             return
-        self.points = [point for point in self.points if int(point["id"]) != int(self.selected_point_id)]
-        self.statusMessage.emit(f"已删除点 {self.selected_point_id}")
+        point_id = int(self.selected_point_id)
+        transition = apply_edit(AnnotationState(points=self.points), DeletePoint(point_id))
+        self.points = transition.next_state.points
+        self.statusMessage.emit(f"已删除点 {point_id}")
         self.selected_point_id = None
         self.pointSelectionChanged.emit(None)
         self.pointCountChanged.emit(len(self.points))
@@ -243,14 +251,9 @@ class PointCanvas(QWidget):
 
         image_x, image_y = self._canvas_to_image(event.position().toPoint())
         if self.mode == "add":
-            new_point = {
-                "id": self._next_point_id(),
-                "x": float(image_x),
-                "y": float(image_y),
-                "score": 1.0,
-                "source": "manual",
-            }
-            self.points.append(new_point)
+            transition = apply_edit(AnnotationState(points=self.points), AddPoint(image_x, image_y))
+            self.points = transition.next_state.points
+            new_point = self.points[-1]
             self.selected_point_id = int(new_point["id"])
             self.pointSelectionChanged.emit(new_point)
             self.pointCountChanged.emit(len(self.points))
@@ -288,14 +291,15 @@ class PointCanvas(QWidget):
         if self._drag_point_id is None or self.mode != "move":
             return
         image_x, image_y = self._canvas_to_image(event.position().toPoint())
-        for point in self.points:
-            if int(point["id"]) == int(self._drag_point_id):
-                point["x"] = float(image_x)
-                point["y"] = float(image_y)
-                point["source"] = "manual"
-                self.pointSelectionChanged.emit(point)
-                self.annotationModified.emit()
-                break
+        point_id = int(self._drag_point_id)
+        if any(int(point["id"]) == point_id for point in self.points):
+            transition = apply_edit(
+                AnnotationState(points=self.points), MovePoint(point_id, image_x, image_y)
+            )
+            self.points = transition.next_state.points
+            point = next(point for point in self.points if int(point["id"]) == point_id)
+            self.pointSelectionChanged.emit(point)
+            self.annotationModified.emit()
         self.update()
 
     def mouseReleaseEvent(self, event):
@@ -345,27 +349,24 @@ class StitchPointEditorDialog(QDialog):
             self.set_image(image, image_path)
 
     def _build_ui(self):
+        self.editor_shell = AnnotationEditorShell(
+            "CAB-F 针点编辑器",
+            "在图像上补点、移动或删除误检，并保存为标注 JSON。",
+            parent=self,
+        )
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(self.editor_shell)
 
-        topbar = QHBoxLayout()
-        topbar.setSpacing(8)
         self.btn_toggle_sidebar = QPushButton("收起侧栏")
+        self.btn_toggle_sidebar.setAccessibleName("切换编辑器侧栏")
+        self.btn_toggle_sidebar.setToolTip("显示或隐藏参数与状态侧栏")
         self.btn_toggle_sidebar.clicked.connect(self._toggle_left_panel)
-        topbar.addWidget(self.btn_toggle_sidebar)
-        topbar.addStretch(1)
-        root.addLayout(topbar)
-
-        self.splitter = QSplitter(Qt.Horizontal)
-        root.addWidget(self.splitter)
-
-        self.left_panel = QWidget()
-        self.left_panel.setMinimumWidth(260)
+        self.editor_shell.add_action(self.btn_toggle_sidebar)
+        self.splitter = self.editor_shell.splitter
+        self.left_panel = self.editor_shell.left_panel
+        self.left_panel.setMinimumWidth(280)
         self.left_panel.setMaximumWidth(380)
-        left_layout = QVBoxLayout(self.left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
 
         form_box = QFrame()
         form_layout = QFormLayout(form_box)
@@ -385,35 +386,21 @@ class StitchPointEditorDialog(QDialog):
         form_layout.addRow("模型", self.edit_model)
         form_layout.addRow("置信度", self.spin_conf)
         form_layout.addRow("输出JSON", self.edit_output)
-        left_layout.addWidget(form_box)
+        self.editor_shell.add_sidebar_section(form_box, "输入与检测")
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
         self.btn_choose_image = QPushButton("选择图片")
         self.btn_use_current = QPushButton("使用当前图")
         self.btn_choose_script = QPushButton("选择脚本")
-        row1.addWidget(self.btn_choose_image)
-        row1.addWidget(self.btn_use_current)
-        row1.addWidget(self.btn_choose_script)
-        left_layout.addLayout(row1)
+        self.editor_shell.add_sidebar(ActionBar((self.btn_choose_image, self.btn_use_current, self.btn_choose_script)))
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
         self.btn_choose_model = QPushButton("选择模型")
         self.btn_detect = QPushButton("模型出点")
         self.btn_clear = QPushButton("清空点")
-        row2.addWidget(self.btn_choose_model)
-        row2.addWidget(self.btn_detect)
-        row2.addWidget(self.btn_clear)
-        left_layout.addLayout(row2)
+        self.editor_shell.add_sidebar(ActionBar((self.btn_choose_model, self.btn_detect, self.btn_clear)))
 
-        row3 = QHBoxLayout()
-        row3.setSpacing(8)
         self.btn_choose_output = QPushButton("选择输出")
         self.btn_save = QPushButton("保存JSON")
-        row3.addWidget(self.btn_choose_output)
-        row3.addWidget(self.btn_save)
-        left_layout.addLayout(row3)
+        self.editor_shell.add_sidebar(ActionBar((self.btn_choose_output, self.btn_save)))
 
         self.toolbar = QToolBar()
         self.toolbar.setMovable(False)
@@ -430,7 +417,7 @@ class StitchPointEditorDialog(QDialog):
             self.toolbar.addAction(action)
             self.action_group.append((action, mode))
         self.action_group[0][0].setChecked(True)
-        left_layout.addWidget(self.toolbar)
+        self.editor_shell.add_sidebar_section(self.toolbar, "编辑模式")
 
         info_box = QFrame()
         info_layout = QFormLayout(info_box)
@@ -440,25 +427,24 @@ class StitchPointEditorDialog(QDialog):
         info_layout.addRow("点数", self.lbl_point_count)
         info_layout.addRow("选中点", self.lbl_selected)
         info_layout.addRow("坐标", self.lbl_xy)
-        left_layout.addWidget(info_box)
+        self.editor_shell.add_sidebar_section(info_box, "当前状态")
 
         self.lbl_help = QLabel(
             "快捷说明\n"
             "新增补点 / 移动拖拽 / 删除误检 / 滚轮缩放 / 右键平移 / 保存后继续流程"
         )
         self.lbl_help.setWordWrap(True)
-        self.lbl_help.setStyleSheet("color:#6B7280;font-size:12px;")
-        left_layout.addWidget(self.lbl_help)
-        left_layout.addStretch(1)
+        self.lbl_help.setProperty("uiRole", "muted")
+        self.editor_shell.add_sidebar(self.lbl_help)
 
-        self.status_label = QLabel("请选择图片，然后点击“模型出点”。")
-        left_layout.addWidget(self.status_label)
+        self.status_label = self.editor_shell.status_banner.label
+        self.status_label.setText("请选择图片，然后点击“模型出点”。")
         self.save_status_label = QLabel("未修改")
-        left_layout.addWidget(self.save_status_label)
+        self.editor_shell.add_sidebar(self.save_status_label)
 
         self.canvas = PointCanvas()
-        self.splitter.addWidget(self.left_panel)
-        self.splitter.addWidget(self.canvas)
+        self.canvas.setAccessibleName("标注画布")
+        self.editor_shell.set_canvas(self.canvas)
         self.splitter.setSizes([340, 1080])
         self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)
 

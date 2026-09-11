@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .route_state import RouteState, close_top, finish_dialog, push
 from .workspaces import request_shutdown
 
 
@@ -64,6 +65,7 @@ class EmbeddedPageHost(QFrame):
 
 @dataclass(slots=True)
 class _RouteEntry:
+    route_id: int
     host: EmbeddedPageHost
     page: QWidget
     source_key: str
@@ -72,6 +74,7 @@ class _RouteEntry:
     finished: bool = False
     callback_called: bool = False
     shutdown_called: bool = False
+    return_on_close: bool = True
 
 
 class PageRouter(QObject):
@@ -88,20 +91,24 @@ class PageRouter(QObject):
         super().__init__(parent)
         self.stack = stack
         self.return_to_workspace = return_to_workspace
-        self._routes: list[_RouteEntry] = []
+        self._state = RouteState()
+        self._entries: dict[int, _RouteEntry] = {}
         self._return_target_override: str | None = None
 
     @property
     def depth(self) -> int:
-        return len(self._routes)
+        return len(self._state.routes)
 
     @property
     def current_page(self) -> QWidget | None:
-        return self._routes[-1].page if self._routes else None
+        if not self._state.routes:
+            return None
+        entry = self._entries.get(self._state.routes[-1].route_id)
+        return entry.page if entry is not None else None
 
     @property
     def current_return_target(self) -> str | None:
-        return self._routes[-1].source_key if self._routes else None
+        return self._state.routes[-1].source_key if self._state.routes else None
 
     @contextmanager
     def returning_to(self, capability_key: str | None) -> Iterator[None]:
@@ -135,31 +142,29 @@ class PageRouter(QObject):
         return entry.host
 
     def close_current(self, *, return_to_source: bool = True) -> None:
-        if not self._routes:
+        if not self._state.routes:
             return
-        entry = self._routes[-1]
+        route = self._state.routes[-1]
+        entry = self._entries.get(route.route_id)
+        if entry is None:
+            self._state = close_top(self._state).state
+            return
         if entry.closing:
             return
         entry.closing = True
+        entry.return_on_close = return_to_source
         self._shutdown_entry(entry)
         if isinstance(entry.page, QDialog) and not entry.finished:
             entry.page.reject()
-            if not entry.finished:
-                self._notify_dialog_finished(entry, int(QDialog.DialogCode.Rejected))
-        if entry not in self._routes:
+            if entry.route_id in self._entries and not entry.finished:
+                self._finish_dialog(entry, int(QDialog.DialogCode.Rejected))
             return
-        self._routes.remove(entry)
-        self.stack.removeWidget(entry.host)
-        entry.host.hide()
-        entry.host.deleteLater()
-        self.depth_changed.emit(len(self._routes))
-        if self._routes:
-            self.stack.setCurrentWidget(self._routes[-1].host)
-        elif return_to_source:
-            self.return_to_workspace(entry.source_key)
+        transition = close_top(self._state)
+        self._state = transition.state
+        self._apply_transition(transition, return_to_source=return_to_source)
 
     def reset(self) -> None:
-        while self._routes:
+        while self._state.routes:
             self.close_current(return_to_source=False)
 
     def _push(
@@ -172,21 +177,53 @@ class PageRouter(QObject):
     ) -> _RouteEntry:
         host = EmbeddedPageHost(page, title, subtitle, self.stack)
         host.back_requested.connect(self.close_current)
-        entry = _RouteEntry(host, page, self._return_target_override or source_key, on_finished)
-        self._routes.append(entry)
+        transition = push(self._state, self._return_target_override or source_key, is_dialog=isinstance(page, QDialog))
+        self._state = transition.state
+        route = transition.added
+        assert route is not None
+        entry = _RouteEntry(route.route_id, host, page, route.source_key, on_finished)
+        self._entries[route.route_id] = entry
         self.stack.addWidget(host)
         self.stack.setCurrentWidget(host)
-        self.depth_changed.emit(len(self._routes))
+        self.depth_changed.emit(len(self._state.routes))
         return entry
 
     def _dialog_finished(self, entry: _RouteEntry, result: int) -> None:
-        if entry not in self._routes:
+        if entry.route_id not in self._entries or entry.finished:
             return
-        self._notify_dialog_finished(entry, result)
-        if entry.closing:
+        self._finish_dialog(entry, result)
+
+    def _finish_dialog(self, entry: _RouteEntry, result: int) -> None:
+        transition = finish_dialog(self._state, entry.route_id, result)
+        if not transition.changed:
             return
-        if self._routes and self._routes[-1] is entry:
-            self.close_current()
+        self._state = transition.state
+        try:
+            self._notify_dialog_finished(entry, result)
+        finally:
+            self._apply_transition(
+                transition,
+                return_to_source=entry.return_on_close,
+            )
+
+    def _apply_transition(self, transition, *, return_to_source: bool = True) -> None:
+        if not transition.changed:
+            return
+        for route in transition.removed:
+            entry = self._entries.pop(route.route_id, None)
+            if entry is None:
+                continue
+            self._shutdown_entry(entry)
+            self.stack.removeWidget(entry.host)
+            entry.host.hide()
+            entry.host.deleteLater()
+        self.depth_changed.emit(len(self._state.routes))
+        if self._state.routes:
+            top = self._entries.get(self._state.routes[-1].route_id)
+            if top is not None:
+                self.stack.setCurrentWidget(top.host)
+        elif return_to_source and transition.return_to_source:
+            self.return_to_workspace(transition.return_to_source)
 
     @staticmethod
     def _notify_dialog_finished(entry: _RouteEntry, result: int) -> None:

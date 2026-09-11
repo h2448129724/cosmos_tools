@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from .capabilities import CapabilityRuntime
 from .project_context import ProjectState
 from .project_session import ArtifactKind, ProjectArtifact
-from .task_center import TaskStatus
+from .ui.primitives import EmptyState
 
 
 class ProjectOverviewPage(QWidget):
@@ -315,14 +315,6 @@ class TaskCenterActivity(QWidget):
     def refresh(self) -> None:
         selected = self.list.currentItem().data(Qt.ItemDataRole.UserRole) if self.list.currentItem() else ""
         self.list.clear()
-        names = {
-            TaskStatus.PENDING: "等待",
-            TaskStatus.RUNNING: "运行中",
-            TaskStatus.SUCCESS: "完成",
-            TaskStatus.BUSINESS_NG: "业务 NG",
-            TaskStatus.FAILED: "失败",
-            TaskStatus.STOPPED: "停止",
-        }
         tasks = self.runtime.task_center.tasks
         if not tasks:
             self.log.clear()
@@ -330,7 +322,9 @@ class TaskCenterActivity(QWidget):
             return
         self.state_stack.setCurrentWidget(self.content)
         for task in tasks:
-            item = QListWidgetItem(f"{task.title}\n{names[task.status]} {task.progress_text}")
+            presentation = self.runtime.task_center.presentation(task.task_id)
+            detail = presentation.summary if presentation is not None else task.title
+            item = QListWidgetItem(detail)
             item.setData(Qt.ItemDataRole.UserRole, task.task_id)
             self.list.addItem(item)
             if task.task_id == selected:
@@ -348,8 +342,12 @@ class TaskCenterActivity(QWidget):
         if task is None:
             self.stop_button.setEnabled(False)
             return
-        self.task_summary.setText(f"{task.title} · {task.status.value}")
-        self.stop_button.setEnabled(task.status == TaskStatus.RUNNING and task.cancellable)
+        presentation = self.runtime.task_center.presentation(task.task_id)
+        self.task_summary.setText(presentation.summary if presentation is not None else task.title)
+        self.stop_button.setEnabled(bool(presentation and presentation.cancellable))
+        self.stop_button.setText(
+            presentation.button_label if presentation and presentation.button_label else "停止任务"
+        )
         for line in task.logs:
             self.log.addItem(line)
 
@@ -359,33 +357,9 @@ class TaskCenterActivity(QWidget):
             self.runtime.task_center.cancel(str(current.data(Qt.ItemDataRole.UserRole)))
 
 
-class _EmptyState(QFrame):
-    """Plain, actionable empty state shared by native project pages."""
+class _EmptyState(EmptyState):
+    """Compatibility name for the shared actionable empty state."""
 
     def __init__(self, title: str, description: str, action_text: str, action, parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("emptyState")
-        self.setStyleSheet(
-            "QFrame#emptyState { background: #ffffff; border: 1px solid #cfd3d7; border-radius: 3px; }"
-            "QLabel#emptyStateTitle { color: #202428; font-size: 15px; font-weight: 600; }"
-            "QLabel#emptyStateDescription { color: #697077; }"
-        )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(8)
-        layout.addStretch(1)
-        title_label = QLabel(title)
-        title_label.setObjectName("emptyStateTitle")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        description_label = QLabel(description)
-        description_label.setObjectName("emptyStateDescription")
-        description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        description_label.setWordWrap(True)
-        button = QPushButton(action_text)
-        button.setProperty("buttonRole", "secondary")
-        button.setMaximumWidth(120)
-        button.clicked.connect(action)
-        layout.addWidget(title_label)
-        layout.addWidget(description_label)
-        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch(1)
+        super().__init__(title, description, action_text, parent)
+        self.action_requested.connect(action)

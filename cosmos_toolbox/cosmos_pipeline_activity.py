@@ -10,28 +10,31 @@ from pathlib import Path
 from uuid import uuid4
 
 import yaml
-from PySide6.QtCore import QProcess, QProcessEnvironment
+from PySide6.QtCore import QProcess, QProcessEnvironment, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
+    QLayout,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from apps.cosmos_pipeline.outcome import PipelineOutcome, outcome_from_process_exit
 from apps.cosmos_pipeline.runner import DEFAULT_BACKEND_CONFIG, PipelineRequest, describe_config, validate_request
 
 from .capabilities import CapabilityRuntime
 from .paths import COSMOS_ROOT, TOOLBOX_ROOT, runtime_env
 from .project_context import ProjectState
 from .task_center import TaskStatus
+from .task_presentation import TaskPresentation, present_task
+from .ui.primitives import ActionBar, CollapsibleLogPanel, PathField, SectionSurface, StatusBanner
 
 
 def build_pipeline_command(request: PipelineRequest, python_executable: str | None = None) -> list[str]:
@@ -59,20 +62,8 @@ def build_pipeline_command(request: PipelineRequest, python_executable: str | No
 
 
 def _card(title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
-    frame = QFrame()
-    frame.setObjectName("cabfCard")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(16, 14, 16, 14)
-    layout.setSpacing(9)
-    title_label = QLabel(title)
-    title_label.setObjectName("cabfCardTitle")
-    layout.addWidget(title_label)
-    if subtitle:
-        subtitle_label = QLabel(subtitle)
-        subtitle_label.setObjectName("cabfCardSubtitle")
-        subtitle_label.setWordWrap(True)
-        layout.addWidget(subtitle_label)
-    return frame, layout
+    surface = SectionSurface(title, subtitle)
+    return surface, surface.body_layout
 
 
 class CosmosPipelineActivity(QWidget):
@@ -93,87 +84,131 @@ class CosmosPipelineActivity(QWidget):
         self.apply_project_context(runtime.project_context.state)
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("cosmosPipelineScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.scroll.setWidget(content)
+        outer.addWidget(self.scroll, 1)
         config_card, config_layout = _card(
             "配置 → 输入 → 检测 → 规则 → 结果",
             "根据产品 YAML 自动识别 CAB、CAB-F、DAB-* 或 OS-DAB，并执行对应的 Cosmos 业务链。",
         )
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        self.config_edit = self._path_row(form, "产品 YAML", "选择 conf 下的产品配置", self._pick_config)
+        self.config_edit = self._path_row(
+            config_layout, "产品 YAML", "选择 conf 下的产品配置", self._pick_config
+        )
         self.config_edit.editingFinished.connect(self._describe)
-        self.backend_edit = self._path_row(form, "后端配置", "assets/config/backend_config.yaml", self._pick_backend)
-        self.manifest_edit = self._path_row(form, "输入清单", "YAML：case 与各输入槽文件", self._pick_manifest)
-        self.output_edit = self._path_row(form, "结果目录", "独立的测试输出目录", self._pick_output)
+        self.backend_edit = self._path_row(
+            config_layout, "后端配置", "assets/config/backend_config.yaml", self._pick_backend
+        )
+        self.manifest_edit = self._path_row(
+            config_layout, "输入清单", "YAML：case 与各输入槽文件", self._pick_manifest
+        )
+        self.output_edit = self._path_row(
+            config_layout, "结果目录", "独立的测试输出目录", self._pick_output
+        )
         self.output_edit.textEdited.connect(lambda _text: setattr(self, "_output_auto", False))
-        config_layout.addLayout(form)
         self.description_label = QLabel("选择产品配置后显示项目、执行引擎和输入槽。")
         self.description_label.setObjectName("cabfMuted")
         self.description_label.setWordWrap(True)
         config_layout.addWidget(self.description_label)
-        options = QHBoxLayout()
-        options.addWidget(QLabel("执行引擎"))
+        options = ActionBar()
+        options.add_widget(QLabel("执行引擎"))
         self.engine_combo = QComboBox()
         self.engine_combo.addItem("自动（与生产一致）", "auto")
         self.engine_combo.addItem("本地算法", "local")
         self.engine_combo.addItem("算法服务", "service")
-        options.addWidget(self.engine_combo)
+        self.engine_combo.setAccessibleName("执行引擎")
+        options.add_widget(self.engine_combo)
         self.dry_run_check = QCheckBox("只检查，不加载模型")
-        options.addWidget(self.dry_run_check)
+        options.add_widget(self.dry_run_check)
         self.persist_db_check = QCheckBox("写入 Cosmos 数据库")
-        options.addWidget(self.persist_db_check)
+        options.add_widget(self.persist_db_check)
         self.fail_on_ng_check = QCheckBox("NG 返回非零退出码（默认）")
         self.fail_on_ng_check.setChecked(True)
-        options.addWidget(self.fail_on_ng_check)
-        options.addStretch(1)
-        config_layout.addLayout(options)
+        options.add_widget(self.fail_on_ng_check)
+        config_layout.addWidget(options)
         layout.addWidget(config_card)
 
         run_card, run_layout = _card(
             "运行状态",
             "Headless 测试不启动生产页面、相机、PLC、Socket 或同步线程；数据库默认关闭。",
         )
-        toolbar = QHBoxLayout()
-        self.status_label = QLabel("等待运行")
-        self.status_label.setObjectName("cabfBadge")
-        toolbar.addWidget(self.status_label)
-        toolbar.addStretch(1)
+        toolbar = ActionBar()
+        self.status_banner = StatusBanner("等待运行")
+        self.status_label = self.status_banner.label
+        toolbar.add_widget(self.status_banner)
         self.start_button = QPushButton("运行完整流程")
         self.start_button.setProperty("buttonRole", "primary")
         self.start_button.clicked.connect(self.start)
-        toolbar.addWidget(self.start_button)
+        self.start_button.setAccessibleName("运行完整 Cosmos 流程")
+        toolbar.add_widget(self.start_button)
         self.cancel_button = QPushButton("停止")
         self.cancel_button.setProperty("buttonRole", "secondary")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel)
-        toolbar.addWidget(self.cancel_button)
-        run_layout.addLayout(toolbar)
+        toolbar.add_widget(self.cancel_button)
+        run_layout.addWidget(toolbar)
         self.error_label = QLabel("")
         self.error_label.setObjectName("cabfMuted")
         self.error_label.setWordWrap(True)
         run_layout.addWidget(self.error_label)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(190)
+        self.log_panel = CollapsibleLogPanel("结构化运行日志")
+        self.log = self.log_panel.log
+        self.log.setMinimumHeight(120)
         self.log.setPlaceholderText("结构化运行日志会显示在这里。")
-        run_layout.addWidget(self.log, 1)
+        run_layout.addWidget(self.log_panel, 1)
         layout.addWidget(run_card, 1)
 
-    def _path_row(self, form: QFormLayout, label: str, placeholder: str, callback) -> QLineEdit:
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        edit = QLineEdit()
-        edit.setPlaceholderText(placeholder)
-        row.addWidget(edit, 1)
-        button = QPushButton("选择")
-        button.setProperty("buttonRole", "secondary")
-        button.clicked.connect(callback)
-        row.addWidget(button)
-        form.addRow(label, container)
-        return edit
+    def _path_row(self, layout, label: str, placeholder: str, callback) -> QLineEdit:
+        field = PathField(label, placeholder=placeholder)
+        field.browse_requested.connect(callback)
+        if isinstance(layout, QFormLayout):
+            layout.addRow(field)
+        else:
+            layout.addWidget(field)
+        return field.line_edit
+
+    def _set_status(self, text: str, tone: str = "neutral") -> None:
+        self.status_banner.set_status(text, tone)
+
+    def _task_presentation(self) -> TaskPresentation | None:
+        """Read the current task through the shared, pure UI projection."""
+
+        if not self._task_id:
+            return None
+        task_center = self.runtime.task_center
+        presentation_for = getattr(task_center, "presentation", None)
+        if callable(presentation_for):
+            presentation = presentation_for(self._task_id)
+            if presentation is not None:
+                return presentation
+        # Lightweight runtime doubles may expose only the record query.  They
+        # still flow through the same functional projection as TaskCenter.
+        get_task = getattr(task_center, "get", None)
+        record = get_task(self._task_id) if callable(get_task) else None
+        return present_task(record) if record is not None else None
+
+    def _sync_task_presentation(self, detail: str = "") -> TaskPresentation | None:
+        presentation = self._task_presentation()
+        if presentation is None:
+            return None
+        text = presentation.status_text
+        if detail:
+            text = f"{text} · {detail}"
+        self._set_status(text, presentation.tone)
+        self.start_button.setEnabled(not presentation.active)
+        self.cancel_button.setEnabled(presentation.cancellable)
+        return presentation
 
     def apply_project_context(self, state: ProjectState) -> None:
         config = state.pipeline_config_path or state.cabf_config_path
@@ -298,7 +333,7 @@ class CosmosPipelineActivity(QWidget):
             if self._ephemeral_manifest is not None:
                 self._ephemeral_manifest.unlink(missing_ok=True)
                 self._ephemeral_manifest = None
-            self.status_label.setText("配置有误")
+            self._set_status("配置有误", "danger")
             self.error_label.setText(str(exc))
             return
         context_updates = {
@@ -351,11 +386,9 @@ class CosmosPipelineActivity(QWidget):
             f"Cosmos 完整流程 · {descriptor.product or descriptor.project}",
             self.capability_key,
             output_path,
-            cancel=self.cancel,
+            cancel=self._terminate_process,
         )
-        self.status_label.setText("运行中")
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
+        self._sync_task_presentation()
         process.start()
 
     def _read_stdout(self) -> None:
@@ -393,15 +426,19 @@ class CosmosPipelineActivity(QWidget):
         if event.get("type") == "progress" and self._task_id:
             self.runtime.task_center.progress(self._task_id, int(event["current"]), int(event["total"]))
         elif event.get("type") == "business_result":
-            self.status_label.setText(f"运行中 · {event.get('slot')} {event.get('outcome')}")
+            self._sync_task_presentation(f"{event.get('slot')} {event.get('outcome')}")
 
     def cancel(self) -> None:
+        if not self._task_id:
+            return
+        self.runtime.task_center.cancel(self._task_id)
+        self._sync_task_presentation()
+
+    def _terminate_process(self) -> None:
         process = self._process
         if process is None or process.state() == QProcess.ProcessState.NotRunning:
             return
         self._cancelling = True
-        self.status_label.setText("正在停止")
-        self.cancel_button.setEnabled(False)
         pid = int(process.processId())
         if os.name == "nt" and pid > 0:
             subprocess.run(
@@ -417,23 +454,19 @@ class CosmosPipelineActivity(QWidget):
     def _on_process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.ProcessError.FailedToStart:
             self._append_line(f"无法启动：{self._process.errorString() if self._process else error}", "stderr")
-            self._finish(TaskStatus.FAILED)
+            self._finish(TaskStatus(PipelineOutcome.TECHNICAL_FAILURE.value))
 
     def _on_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         if self._stdout_buffer:
             self._append_line(self._stdout_buffer, "stdout")
         if self._stderr_buffer:
             self._append_line(self._stderr_buffer, "stderr")
-        status = (
-            TaskStatus.STOPPED
-            if self._cancelling
-            else TaskStatus.SUCCESS
-            if exit_code == 0
-            else TaskStatus.BUSINESS_NG
-            if exit_code == 2
-            else TaskStatus.FAILED
+        outcome = outcome_from_process_exit(
+            exit_code,
+            cancelled=self._cancelling,
+            crashed=_status == QProcess.ExitStatus.CrashExit,
         )
-        self._finish(status)
+        self._finish(TaskStatus(outcome.value))
 
     def _finish(self, status: TaskStatus) -> None:
         if self._task_finished:
@@ -441,15 +474,7 @@ class CosmosPipelineActivity(QWidget):
         self._task_finished = True
         if self._task_id:
             self.runtime.task_center.finish(self._task_id, status)
-        status_text = {
-            TaskStatus.SUCCESS: "完成",
-            TaskStatus.BUSINESS_NG: "业务 NG",
-            TaskStatus.FAILED: "失败",
-            TaskStatus.STOPPED: "已停止",
-        }.get(status, status.value)
-        self.status_label.setText(status_text)
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
+        self._sync_task_presentation()
         process = self._process
         self._process = None
         if process is not None:

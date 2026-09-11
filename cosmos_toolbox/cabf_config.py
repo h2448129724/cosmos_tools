@@ -11,8 +11,28 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 import yaml
+from cabf.roi import (
+    CabfRoiDocument,
+    RoiCardinalityError,
+    RoiField,
+    RoiIssue,
+    collect_roi_fields as collect_roi_fields,
+    normalize_rects as normalize_rects,
+    _find_yaml_key_line as _find_yaml_key_line,
+    _line_indent as _line_indent,
+)
 
+from .cabf_calibration import (
+    CalibrationTransformPlan,
+    ForegroundFacts,
+    SourceImageFacts,
+    decide_foreground,
+    decide_source_image,
+    plan_calibration_transform,
+    plan_half_scale,
+)
 from .paths import COSMOS_ROOT
+from .training.cab_f_project import project_entry
 
 
 class CabfConfigError(ValueError):
@@ -50,25 +70,6 @@ def _atomic_write_with_backup(path: Path, text: str) -> Path | None:
                 temporary.unlink(missing_ok=True)
 
 
-@dataclass(frozen=True, slots=True)
-class RoiField:
-    path_parts: tuple[Any, ...]
-    display_name: str
-    side: str
-    is_multi: bool
-
-    @property
-    def path_key(self) -> str:
-        return ".".join(str(part) for part in self.path_parts)
-
-
-@dataclass(frozen=True, slots=True)
-class RoiIssue:
-    field: str
-    roi_index: int
-    message: str
-
-
 @dataclass(slots=True)
 class TemplateGenerationResult:
     image: np.ndarray
@@ -77,152 +78,7 @@ class TemplateGenerationResult:
     template_size: tuple[int, int]
     calibrated_image: np.ndarray | None = None
     calibration_offset: tuple[int, int] = (0, 0)
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _is_rect_list(value: Any) -> bool:
-    return isinstance(value, list) and len(value) == 4 and all(_is_number(item) for item in value)
-
-
-def _is_multi_rect_list(value: Any) -> bool:
-    return isinstance(value, list) and bool(value) and all(_is_rect_list(item) for item in value)
-
-
-def normalize_rects(value: Any) -> list[tuple[int, int, int, int]]:
-    if _is_rect_list(value):
-        return [tuple(int(item) for item in value)]
-    if _is_multi_rect_list(value):
-        return [tuple(int(item) for item in rect) for rect in value]
-    return []
-
-
-def _detect_side(path_parts: tuple[Any, ...]) -> str:
-    lowered = {str(part).lower() for part in path_parts}
-    if "top" in lowered:
-        return "top"
-    if "bottom" in lowered:
-        return "bottom"
-    return "unknown"
-
-
-def collect_roi_fields(node: Any, path_parts: tuple[Any, ...] = ()) -> list[RoiField]:
-    fields: list[RoiField] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            next_path = path_parts + (key,)
-            key_name = str(key).lower()
-            is_empty_multi_roi = key_name == "roi" and isinstance(value, list) and not value
-            if key_name == "roi" and (
-                _is_rect_list(value) or _is_multi_rect_list(value) or is_empty_multi_roi
-            ):
-                fields.append(
-                    RoiField(
-                        path_parts=next_path,
-                        display_name=".".join(str(part) for part in next_path),
-                        side=_detect_side(next_path),
-                        is_multi=_is_multi_rect_list(value) or is_empty_multi_roi,
-                    )
-                )
-            fields.extend(collect_roi_fields(value, next_path))
-    elif isinstance(node, list):
-        for index, value in enumerate(node):
-            fields.extend(collect_roi_fields(value, path_parts + (index,)))
-    return fields
-
-
-def _get_value(data: Any, path_parts: tuple[Any, ...]) -> Any:
-    current = data
-    for part in path_parts:
-        current = current[part]
-    return current
-
-
-def _set_rects(data: Any, field: RoiField, rects: list[tuple[int, int, int, int]]) -> None:
-    current = data
-    for part in field.path_parts[:-1]:
-        current = current[part]
-    if field.is_multi:
-        current[field.path_parts[-1]] = [[int(value) for value in rect] for rect in rects]
-    else:
-        current[field.path_parts[-1]] = [int(value) for value in rects[0]] if rects else []
-
-
-def _line_indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
-
-
-def _find_yaml_key_line(lines: list[str], path_parts: tuple[Any, ...]) -> int:
-    if not path_parts or any(not isinstance(part, str) for part in path_parts):
-        return -1
-    start = 0
-    end = len(lines)
-    parent_indent = -1
-    for depth, key in enumerate(path_parts):
-        found_index = -1
-        found_indent = -1
-        expected_prefix = f"{key}:"
-        for index in range(start, end):
-            stripped = lines[index].strip()
-            if not stripped or stripped.startswith("#") or not stripped.startswith(expected_prefix):
-                continue
-            indent = _line_indent(lines[index])
-            if indent <= parent_indent:
-                continue
-            if found_index == -1 or indent < found_indent:
-                found_index = index
-                found_indent = indent
-        if found_index < 0:
-            return -1
-        if depth == len(path_parts) - 1:
-            return found_index
-        start = found_index + 1
-        end = len(lines)
-        for index in range(start, len(lines)):
-            stripped = lines[index].strip()
-            if stripped and not stripped.startswith("#") and _line_indent(lines[index]) <= found_indent:
-                end = index
-                break
-        parent_indent = found_indent
-    return -1
-
-
-def _format_roi_value(field: RoiField, rects: list[tuple[int, int, int, int]]) -> str:
-    if field.is_multi:
-        return "[" + ", ".join(f"[{x1}, {y1}, {x2}, {y2}]" for x1, y1, x2, y2 in rects) + "]"
-    if not rects:
-        return "[]"
-    return "[" + ", ".join(str(value) for value in rects[0]) + "]"
-
-
-def _replace_yaml_value_line(line: str, value: str) -> str:
-    newline = "\n" if line.endswith("\n") else ""
-    body = line[:-1] if newline else line
-    comment = ""
-    if "#" in body:
-        body, comment = body.split("#", 1)
-        comment = "#" + comment
-    prefix, separator, _old_value = body.partition(":")
-    if not separator:
-        raise CabfConfigError(f"无法更新 YAML 行：{line.rstrip()}")
-    replaced = f"{prefix}: {value}"
-    if comment:
-        replaced += f"  {comment}"
-    return replaced + newline
-
-
-def _patch_roi_text(text: str, data: dict[str, Any], fields: list[RoiField]) -> str:
-    lines = text.splitlines(keepends=True)
-    for field in fields:
-        index = _find_yaml_key_line(lines, field.path_parts)
-        if index >= 0:
-            lines[index] = _replace_yaml_value_line(
-                lines[index],
-                _format_roi_value(field, normalize_rects(_get_value(data, field.path_parts))),
-            )
-    return "".join(lines)
+    calibration_plan: CalibrationTransformPlan | None = None
 
 
 _LIST_ITEM_RE = re.compile(r"^(?P<indent>\s*)-(?P<rest>.*)$")
@@ -290,13 +146,15 @@ def path_for_config(path: Path, cosmos_root: Path = COSMOS_ROOT) -> str:
 
 
 class CabfConfigDocument:
+    """YAML persistence shell around the pure CAB-F ROI document."""
+
     SIDE_INDEX = {"top": 0, "bottom": 1}
 
     def __init__(self, path: Path, data: dict[str, Any], original_text: str) -> None:
         self.path = path.resolve()
         self.data = data
         self.original_text = original_text
-        self._roi_fields = collect_roi_fields(data)
+        self.roi_document = CabfRoiDocument(data)
 
     @classmethod
     def load(cls, path: str | Path) -> "CabfConfigDocument":
@@ -317,15 +175,16 @@ class CabfConfigDocument:
         return " / ".join(item for item in (project, product) if item)
 
     def roi_fields(self, side: str) -> list[RoiField]:
-        return [field for field in self._roi_fields if field.side == side]
+        return self.roi_document.fields(side)
 
     def rects(self, field: RoiField) -> list[tuple[int, int, int, int]]:
-        return normalize_rects(_get_value(self.data, field.path_parts))
+        return self.roi_document.rects(field)
 
     def set_rects(self, field: RoiField, rects: list[tuple[int, int, int, int]]) -> None:
-        if not field.is_multi and len(rects) > 1:
-            raise CabfConfigError(f"{field.display_name} 是单 ROI 字段")
-        _set_rects(self.data, field, rects)
+        try:
+            self.roi_document.set_rects(field, rects)
+        except RoiCardinalityError as exc:
+            raise CabfConfigError(f"{field.display_name} 是单 ROI 字段") from exc
 
     def template_value(self, side: str) -> str:
         index = self.SIDE_INDEX[side]
@@ -342,18 +201,13 @@ class CabfConfigDocument:
         return resolve_config_path(value, self.path) if value else None
 
     def validate_rois(self, side: str, image_size: tuple[int, int]) -> list[RoiIssue]:
-        width, height = image_size
-        issues: list[RoiIssue] = []
-        for field in self.roi_fields(side):
-            for index, (x1, y1, x2, y2) in enumerate(self.rects(field)):
-                if x2 <= x1 or y2 <= y1:
-                    issues.append(RoiIssue(field.display_name, index, "坐标顺序无效"))
-                elif x1 < 0 or y1 < 0 or x2 > width or y2 > height:
-                    issues.append(RoiIssue(field.display_name, index, f"超出基准图 {width}×{height}"))
-        return issues
+        return self.roi_document.validate(
+            side,
+            calibrated_reference_size=image_size,
+        )
 
     def save_rois(self) -> None:
-        patched = _patch_roi_text(self.original_text, self.data, self._roi_fields)
+        patched = self.roi_document.patch_text(self.original_text)
         _atomic_write_with_backup(self.path, patched)
         self.original_text = patched
 
@@ -440,10 +294,10 @@ class CabfTemplateGenerator:
 
     def _ensure_components(self, model_path: str) -> tuple[Any, Any]:
         if self._extractor_factory is None or self._matcher_factory is None:
-            from algo.cab_f import CADMatcher, GlueExtractor
+            cab_f = project_entry()
 
-            extractor_factory = self._extractor_factory or GlueExtractor
-            matcher_factory = self._matcher_factory or CADMatcher
+            extractor_factory = self._extractor_factory or cab_f.GlueExtractor
+            matcher_factory = self._matcher_factory or cab_f.CADMatcher
         else:
             extractor_factory = self._extractor_factory
             matcher_factory = self._matcher_factory
@@ -459,24 +313,53 @@ class CabfTemplateGenerator:
         return self.generate(image)
 
     def generate(self, image: np.ndarray) -> TemplateGenerationResult:
-        if image is None or image.ndim != 3 or image.shape[2] != 3:
-            raise CabfConfigError("初始原图必须是三通道彩色图片")
-        channel_spread = np.ptp(image, axis=2)
-        gray = image[:, :, 0]
-        near_binary = (gray <= 10) | (gray >= 245)
-        if int(channel_spread.max()) <= 1 and float(near_binary.mean()) >= 0.995:
+        shape = tuple(int(value) for value in getattr(image, "shape", ()))
+        if len(shape) == 3 and shape[0] > 0 and shape[1] > 0 and shape[2] == 3:
+            channel_spread = np.ptp(image, axis=2)
+            gray = image[:, :, 0]
+            near_binary = (gray <= 10) | (gray >= 245)
+            source_decision = decide_source_image(
+                SourceImageFacts(
+                    shape=shape,
+                    channel_spread_max=float(channel_spread.max()),
+                    near_binary_ratio=float(near_binary.mean()),
+                )
+            )
+        else:
+            source_decision = decide_source_image(
+                SourceImageFacts(shape=shape, channel_spread_max=0.0, near_binary_ratio=0.0)
+            )
+        if not source_decision.accepted and source_decision.rejection == "binary_template":
             raise CabfConfigError(
                 "当前图片是黑白二值匹配模板，不是现场原始基准图；"
                 "请选择相机采集的原始彩色基准图重新生成模板"
             )
+        if not source_decision.accepted:
+            raise CabfConfigError("初始原图必须是三通道彩色图片")
         model_path = self._model_path_loader()
         extractor, matcher = self._ensure_components(model_path)
         source_height, source_width = image.shape[:2]
         # Resize before the channel conversion so a full-resolution RGB copy
         # is not kept next to a very large CAB-F source image.
-        resized_bgr = cv2.resize(image, (0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        half_scale = plan_half_scale((source_width, source_height))
+        # Keep OpenCV's fx/fy path (including its behaviour for degenerate
+        # one-pixel inputs); the pure plan exposes the dimensions it computes
+        # for ordinary odd/even images without changing this shell effect.
+        resized_bgr = cv2.resize(
+            image,
+            (0, 0),
+            fx=half_scale.scale,
+            fy=half_scale.scale,
+            interpolation=cv2.INTER_AREA,
+        )
         mask = extractor.glue_extract(resized_bgr)
-        if not np.any(mask < 128):
+        foreground_decision = decide_foreground(
+            ForegroundFacts(
+                foreground_pixels=int(np.count_nonzero(mask < 128)),
+                total_pixels=int(mask.size),
+            )
+        )
+        if not foreground_decision.accepted:
             raise CabfConfigError(
                 "胶体分割未检测到前景；请确认选择的是现场原始基准图，"
                 "并检查 backend_config.yaml 中的 cab_f.glue_segment 模型"
@@ -484,20 +367,27 @@ class CabfTemplateGenerator:
         template, half_offset = matcher.center_and_refine_template_with_offset(mask)
         template = np.ascontiguousarray(template)
         template_height, template_width = template.shape[:2]
-        scale_y = source_height / max(template_height, 1)
-        scale_x = source_width / max(template_width, 1)
-        full_offset = (
-            int(round(half_offset[0] * scale_y)),
-            int(round(half_offset[1] * scale_x)),
+        calibration_plan = plan_calibration_transform(
+            (source_width, source_height),
+            (template_width, template_height),
+            half_offset,
         )
         from algo.common.cad_match_core import transform
 
-        calibrated_image = np.ascontiguousarray(transform(image, full_offset, 0.0, border_value=0))
+        calibrated_image = np.ascontiguousarray(
+            transform(
+                image,
+                calibration_plan.full_offset,
+                calibration_plan.angle_degrees,
+                border_value=calibration_plan.border_value,
+            )
+        )
         return TemplateGenerationResult(
             image=template,
             model_path=model_path,
             source_size=(source_width, source_height),
             template_size=(template_width, template_height),
             calibrated_image=calibrated_image,
-            calibration_offset=full_offset,
+            calibration_offset=calibration_plan.full_offset,
+            calibration_plan=calibration_plan,
         )

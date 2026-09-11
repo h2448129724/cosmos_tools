@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from .infer import predict_edges
+from .evaluation_core import compare_edges, normalize_edges
 
 
 def _imread(path: str) -> np.ndarray:
@@ -61,17 +62,7 @@ def normalize_points(annotation: dict) -> dict[int, tuple[int, int]]:
 
 
 def normalize_edge_set(edges: list[dict]) -> set[tuple[int, int]]:
-    edge_set: set[tuple[int, int]] = set()
-    for edge in edges:
-        try:
-            src = int(edge["src"])
-            dst = int(edge["dst"])
-        except Exception:
-            continue
-        if src == dst:
-            continue
-        edge_set.add(tuple(sorted((src, dst))))
-    return edge_set
+    return set(normalize_edges(edges))
 
 
 def draw_points(image: np.ndarray, point_map: dict[int, tuple[int, int]]):
@@ -134,31 +125,21 @@ def build_visualization(json_path: str, image_path: str, model_path: str, thresh
     point_map = normalize_points(annotation)
 
     pred_edges_raw = predict_edges(json_path, image_path, model_path, threshold=threshold)
-    pred_edges = normalize_edge_set(pred_edges_raw)
-    gt_edges = normalize_edge_set(annotation.get("edges", []))
-
-    tp_edges = pred_edges & gt_edges
-    fp_edges = pred_edges - gt_edges
-    fn_edges = gt_edges - pred_edges
+    comparison = compare_edges(annotation.get("edges", []), pred_edges_raw)
 
     vis = image.copy()
-    draw_edges(vis, fn_edges, point_map, (255, 0, 0), thickness=2)
-    draw_edges(vis, fp_edges, point_map, (0, 0, 255), thickness=2)
-    draw_edges(vis, tp_edges, point_map, (0, 220, 255), thickness=3)
+    draw_edges(vis, comparison.false_negative, point_map, (255, 0, 0), thickness=2)
+    draw_edges(vis, comparison.false_positive, point_map, (0, 0, 255), thickness=2)
+    draw_edges(vis, comparison.true_positive, point_map, (0, 220, 255), thickness=3)
     draw_points(vis, point_map)
     draw_legend(vis)
 
+    comparison_metrics = comparison.metrics()
     metrics = {
         "json_path": json_path,
         "image_path": resolved_image_path,
         "num_points": len(point_map),
-        "gt_edges": len(gt_edges),
-        "pred_edges": len(pred_edges),
-        "tp": len(tp_edges),
-        "fp": len(fp_edges),
-        "fn": len(fn_edges),
-        "precision": len(tp_edges) / max(len(tp_edges) + len(fp_edges), 1),
-        "recall": len(tp_edges) / max(len(tp_edges) + len(fn_edges), 1),
+        **comparison_metrics,
     }
     return vis, metrics
 

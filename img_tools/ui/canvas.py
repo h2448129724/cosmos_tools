@@ -28,12 +28,13 @@ def _to_pixmap(image: np.ndarray) -> QPixmap:
 
 
 class ImageCanvas(QWidget):
-    """Canvas with pixel inspection, middle-button pan, zoom and drag ROI creation."""
+    """Canvas with pixel inspection, pan, zoom, and editable ROI rectangles."""
 
     pixelHovered = Signal(int, int, object)
     coordinateClicked = Signal(int, int)
     pointSelected = Signal(int, int)
     roiDrawn = Signal(object)
+    roiMoved = Signal(int, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -46,8 +47,12 @@ class ImageCanvas(QWidget):
         self._preview_roi: Roi | None = None
         self._active_roi = -1
         self._roi_mode = False
+        self._fixed_roi_size: tuple[int, int] | None = None
         self._drag_origin: tuple[int, int] | None = None
         self._drag_current: tuple[int, int] | None = None
+        self._moving_roi_index = -1
+        self._moving_roi_origin: Roi | None = None
+        self._move_pointer_offset: tuple[int, int] | None = None
         self._pressed_coordinate: tuple[int, int] | None = None
         self._pan_origin: QPointF | None = None
         self._pan_offset = QPointF()
@@ -75,6 +80,11 @@ class ImageCanvas(QWidget):
             self._drag_current = None
             self._preview_roi = None
         self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+        self.update()
+
+    def set_fixed_roi_size(self, size: tuple[int, int] | None) -> None:
+        """Use an exact width and height for ROI placement, or freehand when unset."""
+        self._fixed_roi_size = size
         self.update()
 
     def set_image(self, image: np.ndarray | None, *, source_size: tuple[int, int] | None = None) -> None:
@@ -143,9 +153,12 @@ class ImageCanvas(QWidget):
         if self._preview_roi is not None:
             self._draw_roi(painter, self._preview_roi, QColor("#00e096"), "预览", False, dashed=True)
         if self._drag_origin is not None and self._drag_current is not None:
-            x1, y1 = self._drag_origin
-            x2, y2 = self._drag_current
-            roi = Roi(min(x1, x2), min(y1, y2), max(1, abs(x2 - x1)), max(1, abs(y2 - y1)), "拖拽")
+            if self._fixed_roi_size is not None:
+                roi = self._fixed_roi_at(self._drag_current)
+            else:
+                x1, y1 = self._drag_origin
+                x2, y2 = self._drag_current
+                roi = Roi(min(x1, x2), min(y1, y2), max(1, abs(x2 - x1)), max(1, abs(y2 - y1)), "拖拽")
             self._draw_roi(painter, roi, QColor("#4dabf7"), "新 ROI", False, dashed=True)
 
     def _draw_roi(self, painter: QPainter, roi: Roi, color: QColor, label: str, active: bool, *, dashed: bool = False) -> None:
@@ -173,6 +186,14 @@ class ImageCanvas(QWidget):
             if not self._roi_mode:
                 return
             if coordinate is not None:
+                roi_index = self._roi_at(coordinate)
+                if roi_index >= 0:
+                    roi = self._rois[roi_index]
+                    self._moving_roi_index = roi_index
+                    self._moving_roi_origin = roi
+                    self._move_pointer_offset = (coordinate[0] - roi.x, coordinate[1] - roi.y)
+                    self.setCursor(Qt.ClosedHandCursor)
+                    return
                 self._drag_origin = coordinate
                 self._drag_current = coordinate
             return
@@ -194,6 +215,11 @@ class ImageCanvas(QWidget):
         if self._drag_origin is not None and coordinate is not None:
             self._drag_current = coordinate
             self.update()
+        elif self._moving_roi_index >= 0 and coordinate is not None and self._moving_roi_origin is not None:
+            offset_x, offset_y = self._move_pointer_offset or (0, 0)
+            moved = self._move_roi_to(self._moving_roi_origin, coordinate[0] - offset_x, coordinate[1] - offset_y)
+            self._rois[self._moving_roi_index] = moved
+            self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MiddleButton and self._pan_origin is not None:
@@ -207,6 +233,17 @@ class ImageCanvas(QWidget):
                 self.coordinateClicked.emit(*self._pressed_coordinate)
             self._pressed_coordinate = None
             return
+        if self._moving_roi_index >= 0:
+            index = self._moving_roi_index
+            roi = self._rois[index]
+            self._moving_roi_index = -1
+            self._moving_roi_origin = None
+            self._move_pointer_offset = None
+            self._pressed_coordinate = None
+            self.setCursor(Qt.CrossCursor)
+            self.roiMoved.emit(index, roi)
+            self.update()
+            return
         if self._drag_origin is None:
             self._pressed_coordinate = None
             return
@@ -214,7 +251,9 @@ class ImageCanvas(QWidget):
         self._drag_origin = None
         self._drag_current = None
         dx, dy = abs(current[0] - origin[0]), abs(current[1] - origin[1])
-        if dx < 3 and dy < 3:
+        if self._fixed_roi_size is not None:
+            self.roiDrawn.emit(self._fixed_roi_at(current))
+        elif dx < 3 and dy < 3:
             self.coordinateClicked.emit(*origin)
             self.pointSelected.emit(*origin)
         else:
@@ -222,6 +261,29 @@ class ImageCanvas(QWidget):
             self.roiDrawn.emit(roi)
         self._pressed_coordinate = None
         self.update()
+
+    def _roi_at(self, coordinate: tuple[int, int]) -> int:
+        """Return the top-most ROI containing the coordinate, preferring the active ROI."""
+        x, y = coordinate
+        indices = list(range(len(self._rois) - 1, -1, -1))
+        if self._active_roi in indices:
+            indices.remove(self._active_roi)
+            indices.insert(0, self._active_roi)
+        for index in indices:
+            roi = self._rois[index]
+            if roi.x <= x < roi.x2 and roi.y <= y < roi.y2:
+                return index
+        return -1
+
+    def _move_roi_to(self, roi: Roi, x: int, y: int) -> Roi:
+        source_w, source_h = self._source_size or (self._pixmap.width(), self._pixmap.height())
+        x = max(0, min(x, max(0, source_w - roi.width)))
+        y = max(0, min(y, max(0, source_h - roi.height)))
+        return Roi(x, y, roi.width, roi.height, roi.name)
+
+    def _fixed_roi_at(self, coordinate: tuple[int, int]) -> Roi:
+        width, height = self._fixed_roi_size or (1, 1)
+        return self._move_roi_to(Roi(0, 0, width, height, "ROI"), *coordinate)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         if self._pixmap.isNull():

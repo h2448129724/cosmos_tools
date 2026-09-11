@@ -150,10 +150,12 @@ def run_pipeline(
     batch_size: int = 16,
     patch_batch_size: int = 128,
 ) -> dict:
-    from algo.cab_f.sew_point_connector import SewPointConnector
     from algo.models.ort_providers import get_ort_device
+    from cosmos_toolbox.training.cab_f_project import project_entry
     from sew_point.inference_onnx import KeypointDetectorONNX
     from sew_point.tools.predict_large_image import detect_large_image
+
+    SewPointConnector = project_entry().SewPointConnector
 
     source = Path(image_path).expanduser().resolve()
     image = _read_image(source)

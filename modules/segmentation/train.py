@@ -8,7 +8,7 @@ TOOLBOX_ROOT = Path(__file__).resolve().parents[2]
 if str(TOOLBOX_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLBOX_ROOT))
 
-from trainer import train_model
+from trainer import train_model  # noqa: E402 - imported after direct-script path bootstrap
 # python segmentation/train.py --img_dir D:\project\changrui\CAB-F\glue\train\images --ann_dir D:\project\changrui\CAB-F\glue\train\annotations --model microunet --image_size 256 --product inforcement --label_name 'glue' --pretrained_ckpt D:\project\changrui\cosmos\assets\weights\cab_f\cab_extract_glue.pth
 
 def main():

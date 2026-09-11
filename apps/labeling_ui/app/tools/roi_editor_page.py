@@ -1,7 +1,6 @@
 """YAML ROI 配置可视化编辑工具。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,14 @@ from PySide6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
 )
+from cabf.roi import (
+    RoiField,
+    collect_roi_fields,
+    get_value as _get_value,
+    normalize_rects,
+    patch_roi_text,
+    set_rects,
+)
 try:
     from ruamel.yaml import YAML
 except ImportError:  # pragma: no cover - depends on local env
@@ -31,6 +38,8 @@ else:
     pyyaml = None
 
 from apps.data_tools.processing.image_io import read_image
+from cosmos_toolbox.ui.primitives import ActionBar, set_ui_role
+from cosmos_toolbox.ui.theme import status_badge_stylesheet
 from ..preview_widget import ZoomableLabel, cv2_to_qpixmap
 from .base import BaseToolPage, make_card, make_page_header, set_primary
 
@@ -43,65 +52,12 @@ else:
     yaml = None
 
 
-@dataclass
-class RoiField:
-    path_parts: tuple[Any, ...]
-    display_name: str
-    side: str
-    is_multi: bool
-
-    @property
-    def path_key(self) -> str:
-        return ".".join(str(part) for part in self.path_parts)
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float))
-
-
-def _is_rect_list(value: Any) -> bool:
-    return isinstance(value, list) and len(value) == 4 and all(_is_number(v) for v in value)
-
-
-def _is_multi_rect_list(value: Any) -> bool:
-    return isinstance(value, list) and bool(value) and all(_is_rect_list(item) for item in value)
-
-
 def _normalize_rects(value: Any) -> list[tuple[int, int, int, int]]:
-    if _is_rect_list(value):
-        x1, y1, x2, y2 = value
-        return [(int(x1), int(y1), int(x2), int(y2))]
-    if _is_multi_rect_list(value):
-        return [tuple(int(v) for v in item) for item in value]
-    return []
+    return normalize_rects(value, allow_boolean=True)
 
 
 def _write_rects_back(field: RoiField, data: Any, rects: list[tuple[int, int, int, int]]) -> None:
-    target = data
-    for part in field.path_parts[:-1]:
-        target = target[part]
-    if field.is_multi:
-        target[field.path_parts[-1]] = [[int(v) for v in rect] for rect in rects]
-    else:
-        if not rects:
-            target[field.path_parts[-1]] = []
-        else:
-            target[field.path_parts[-1]] = [int(v) for v in rects[0]]
-
-
-def _get_value(data: Any, path_parts: tuple[Any, ...]) -> Any:
-    target = data
-    for part in path_parts:
-        target = target[part]
-    return target
-
-
-def _detect_side(path_parts: tuple[Any, ...]) -> str:
-    if "top" in path_parts:
-        return "top"
-    if "bottom" in path_parts:
-        return "bottom"
-    return "unknown"
+    set_rects(data, field, rects, reject_multiple=False)
 
 
 def _collect_roi_fields(
@@ -112,24 +68,17 @@ def _collect_roi_fields(
     if cab_f_config is None:
         inspection = node.get("inspection", {}) if isinstance(node, dict) else {}
         cab_f_config = str(inspection.get("project", "")).upper() == "CAB-F"
-    fields: list[RoiField] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            next_path = path_parts + (key,)
-            key_str = str(key).lower()
-            is_roi_key = key_str == "roi" if cab_f_config else key_str in {"roi", "rois"}
-            is_empty_multi_roi = cab_f_config and key_str == "roi" and isinstance(value, list) and not value
-            if is_roi_key and (
-                _is_rect_list(value) or _is_multi_rect_list(value) or is_empty_multi_roi
-            ):
-                side = _detect_side(next_path)
-                display = ".".join(str(part) for part in next_path)
-                fields.append(RoiField(next_path, display, side, _is_multi_rect_list(value) or is_empty_multi_roi))
-            fields.extend(_collect_roi_fields(value, next_path, cab_f_config))
-    elif isinstance(node, list):
-        for index, value in enumerate(node):
-            fields.extend(_collect_roi_fields(value, path_parts + (index,), cab_f_config))
-    return fields
+    if cab_f_config:
+        return collect_roi_fields(node, path_parts)
+    # This page predates CAB-F and accepts both spellings for other projects.
+    return collect_roi_fields(
+        node,
+        path_parts,
+        roi_keys=("roi", "rois"),
+        empty_roi_is_multi=False,
+        allow_boolean=True,
+        side_case_sensitive=True,
+    )
 
 
 def _find_loader_dir(config_data: Any, side: str) -> str:
@@ -164,91 +113,8 @@ def _load_yaml_file(path: Path) -> Any:
         return pyyaml.safe_load(fh)
 
 
-def _format_roi_value(field: RoiField, rects: list[tuple[int, int, int, int]]) -> str:
-    if field.is_multi:
-        inner = ", ".join(f"[{x1}, {y1}, {x2}, {y2}]" for x1, y1, x2, y2 in rects)
-        return f"[{inner}]"
-    if not rects:
-        return "[]"
-    x1, y1, x2, y2 = rects[0]
-    return f"[{x1}, {y1}, {x2}, {y2}]"
-
-
-def _line_indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
-
-
-def _find_yaml_key_line(lines: list[str], path_parts: tuple[Any, ...]) -> int:
-    if not path_parts or any(not isinstance(part, str) for part in path_parts):
-        return -1
-
-    start = 0
-    end = len(lines)
-    parent_indent = -1
-
-    for depth, key in enumerate(path_parts):
-        found_index = -1
-        found_indent = -1
-        expected_prefix = f"{key}:"
-        for idx in range(start, end):
-            stripped = lines[idx].strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if not stripped.startswith(expected_prefix):
-                continue
-            indent = _line_indent(lines[idx])
-            if indent <= parent_indent:
-                continue
-            if found_index == -1 or indent < found_indent:
-                found_index = idx
-                found_indent = indent
-        if found_index == -1:
-            return -1
-        if depth == len(path_parts) - 1:
-            return found_index
-
-        child_start = found_index + 1
-        child_end = len(lines)
-        for idx in range(child_start, len(lines)):
-            stripped = lines[idx].strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = _line_indent(lines[idx])
-            if indent <= found_indent:
-                child_end = idx
-                break
-        start = child_start
-        end = child_end
-        parent_indent = found_indent
-
-    return -1
-
-
-def _replace_roi_line(lines: list[str], line_index: int, field: RoiField, rects: list[tuple[int, int, int, int]]) -> None:
-    line = lines[line_index]
-    newline = "\n" if line.endswith("\n") else ""
-    body = line[:-1] if newline else line
-    comment = ""
-    hash_index = body.find("#")
-    if hash_index >= 0:
-        comment = body[hash_index:]
-        body = body[:hash_index].rstrip()
-    prefix, _, _ = body.partition(":")
-    replaced = f"{prefix}: {_format_roi_value(field, rects)}"
-    if comment:
-        replaced = f"{replaced}  {comment}"
-    lines[line_index] = replaced + newline
-
-
 def _patch_yaml_roi_text(original_text: str, data: Any, fields: list[RoiField]) -> str:
-    lines = original_text.splitlines(keepends=True)
-    for field in fields:
-        line_index = _find_yaml_key_line(lines, field.path_parts)
-        if line_index < 0:
-            continue
-        rects = _normalize_rects(_get_value(data, field.path_parts))
-        _replace_roi_line(lines, line_index, field, rects)
-    return "".join(lines)
+    return patch_roi_text(original_text, data, fields, allow_boolean=True)
 
 
 def _dump_yaml_file(path: Path, data: Any, roi_fields: list[RoiField], original_text: str | None) -> str:
@@ -324,19 +190,23 @@ class RoiConfigEditorPage(BaseToolPage):
         config_card_lay.setContentsMargins(14, 14, 14, 14)
         config_card_lay.setSpacing(8)
         config_title = QLabel("配置加载区")
-        config_title.setStyleSheet("color:#0f172a;font-size:15px;font-weight:700;")
+        set_ui_role(config_title, "sectionTitle")
         config_card_lay.addWidget(config_title)
 
         config_desc = QLabel("选择配置与当前编辑图片。图片只会在你手动选择时变更。")
         config_desc.setWordWrap(True)
-        config_desc.setStyleSheet("color:#64748b;")
+        set_ui_role(config_desc, "muted")
         config_card_lay.addWidget(config_desc)
 
         cfg_box = QFrame()
         cfg_form = QFormLayout(cfg_box)
         cfg_form.setContentsMargins(0, 0, 0, 0)
         self._config_entry = QLineEdit("")
+        self._config_entry.setAccessibleName("配置文件路径")
+        self._config_entry.setPlaceholderText("选择 YAML 配置文件")
         self._side_combo = QComboBox()
+        self._side_combo.setAccessibleName("样本侧别")
+        self._side_combo.setToolTip("切换 TOP/BOTTOM 样本及对应 ROI")
         self._side_combo.addItem("TOP", "top")
         self._side_combo.addItem("BOTTOM", "bottom")
         cfg_form.addRow("配置文件", self._config_entry)
@@ -345,51 +215,57 @@ class RoiConfigEditorPage(BaseToolPage):
 
         image_state_card = QFrame()
         image_state_card.setObjectName("hintPanel")
+        set_ui_role(image_state_card, "hint")
+        image_state_card.setAccessibleName("当前图片状态")
         image_state_lay = QVBoxLayout(image_state_card)
         image_state_lay.setContentsMargins(12, 10, 12, 10)
         image_state_lay.setSpacing(4)
         image_state_label = QLabel("当前图片")
-        image_state_label.setStyleSheet("color:#0f172a;font-weight:700;")
+        set_ui_role(image_state_label, "sectionTitle")
         image_state_lay.addWidget(image_state_label)
         badge_row = QHBoxLayout()
         badge_row.setSpacing(8)
         self._side_badge = QLabel("TOP")
-        self._side_badge.setStyleSheet("background:#D8E3EE;color:#28577F;border:1px solid #C5D4E1;border-radius:2px;padding:2px 7px;font-weight:700;")
+        self._side_badge.setAccessibleName("当前样本侧别")
+        self._side_badge.setStyleSheet(status_badge_stylesheet("info"))
         self._select_badge = QLabel("未选择")
-        self._select_badge.setStyleSheet("background:#E9EBED;color:#555D64;border:1px solid #CFD3D7;border-radius:2px;padding:2px 7px;font-weight:700;")
+        self._select_badge.setAccessibleName("样本图片选择状态")
+        self._select_badge.setStyleSheet(status_badge_stylesheet("neutral"))
         badge_row.addWidget(self._side_badge)
         badge_row.addWidget(self._select_badge)
         badge_row.addStretch(1)
         image_state_lay.addLayout(badge_row)
         self._sample_image_bar = QLabel("未选择图片")
         self._sample_image_bar.setWordWrap(True)
-        self._sample_image_bar.setStyleSheet("color:#0f172a;font-weight:700;")
+        set_ui_role(self._sample_image_bar, "sectionTitle")
         image_state_lay.addWidget(self._sample_image_bar)
         self._sample_image_meta = QLabel("请选择一张图片作为当前编辑底图。")
         self._sample_image_meta.setWordWrap(True)
-        self._sample_image_meta.setStyleSheet("color:#64748b;")
+        set_ui_role(self._sample_image_meta, "muted")
         image_state_lay.addWidget(self._sample_image_meta)
         config_card_lay.addWidget(image_state_card)
 
-        cfg_btns = QHBoxLayout()
+        cfg_btns = ActionBar()
+        cfg_btns.setAccessibleName("配置操作工具栏")
         btn_cfg = QPushButton("浏览配置")
-        btn_cfg.setMinimumHeight(36)
+        btn_cfg.setAccessibleName("浏览 YAML 配置")
+        btn_cfg.setToolTip("选择要编辑的 YAML 配置文件")
         btn_cfg.clicked.connect(self._pick_config)
         btn_sample_image = QPushButton("选择图片")
-        btn_sample_image.setMinimumHeight(36)
+        btn_sample_image.setAccessibleName("选择样本图片")
+        btn_sample_image.setToolTip("选择当前侧别的样本底图")
         btn_sample_image.clicked.connect(self._pick_sample_image)
         btn_clear_image = QPushButton("清除当前图片")
-        btn_clear_image.setMinimumHeight(36)
+        btn_clear_image.setAccessibleName("清除当前样本图片")
         btn_clear_image.clicked.connect(self._clear_sample_image)
         btn_load = QPushButton("加载配置")
-        btn_load.setMinimumHeight(36)
+        btn_load.setAccessibleName("加载 YAML 配置")
+        btn_load.setToolTip("读取配置并发现可编辑 ROI 字段")
         set_primary(btn_load)
         btn_load.clicked.connect(self._load_config)
-        cfg_btns.addWidget(btn_cfg)
-        cfg_btns.addWidget(btn_sample_image)
-        cfg_btns.addWidget(btn_clear_image)
-        cfg_btns.addWidget(btn_load)
-        config_card_lay.addLayout(cfg_btns)
+        for widget in (btn_cfg, btn_sample_image, btn_clear_image, btn_load):
+            cfg_btns.add_widget(widget)
+        config_card_lay.addWidget(cfg_btns)
         left_lay.addWidget(config_card)
 
         editor_card = make_card()
@@ -397,77 +273,85 @@ class RoiConfigEditorPage(BaseToolPage):
         editor_card_lay.setContentsMargins(14, 14, 14, 14)
         editor_card_lay.setSpacing(8)
         editor_title = QLabel("ROI 编辑区")
-        editor_title.setStyleSheet("color:#0f172a;font-size:15px;font-weight:700;")
+        set_ui_role(editor_title, "sectionTitle")
         editor_card_lay.addWidget(editor_title)
 
         editor_desc = QLabel("选择字段后，在右侧直接编辑 ROI。")
         editor_desc.setWordWrap(True)
-        editor_desc.setStyleSheet("color:#64748b;")
+        set_ui_role(editor_desc, "muted")
         editor_card_lay.addWidget(editor_desc)
 
         self._field_list = QListWidget()
+        self._field_list.setAccessibleName("ROI 字段列表")
+        self._field_list.setToolTip("选择要在预览画布中编辑的 ROI 字段")
         self._field_list.currentRowChanged.connect(self._on_field_selected)
         field_section = QFrame()
+        set_ui_role(field_section, "sectionSurface")
+        field_section.setProperty("nested", True)
         field_section_lay = QVBoxLayout(field_section)
         field_section_lay.setContentsMargins(0, 0, 0, 0)
         field_section_lay.setSpacing(8)
         field_title = QLabel("ROI 字段")
-        field_title.setStyleSheet("color:#0f172a;font-weight:700;")
+        set_ui_role(field_title, "sectionTitle")
         field_section_lay.addWidget(field_title)
         field_section_lay.addWidget(self._field_list, 1)
         editor_card_lay.addWidget(field_section, 1)
 
         self._field_meta = QLabel("等待加载配置。")
         self._field_meta.setWordWrap(True)
-        self._field_meta.setStyleSheet("color:#64748b;")
+        set_ui_role(self._field_meta, "muted")
         editor_card_lay.addWidget(self._field_meta)
 
         self._edit_help = QLabel("框内拖动可移动，拖四角可缩放。")
         self._edit_help.setWordWrap(True)
-        self._edit_help.setStyleSheet("color:#64748b;")
+        set_ui_role(self._edit_help, "muted")
         editor_card_lay.addWidget(self._edit_help)
 
-        roi_btns = QHBoxLayout()
+        roi_btns = ActionBar()
+        roi_btns.setAccessibleName("ROI 编辑工具栏")
         btn_start = QPushButton("开始框选")
-        btn_start.setMinimumHeight(36)
+        btn_start.setAccessibleName("开始 ROI 框选")
+        btn_start.setToolTip("在右侧图像上拖动创建 ROI")
         set_primary(btn_start)
         btn_start.clicked.connect(self._start_select)
         btn_undo = QPushButton("撤销上一个")
-        btn_undo.setMinimumHeight(36)
+        btn_undo.setAccessibleName("撤销上一个 ROI")
         btn_undo.clicked.connect(self._undo_rect)
         btn_clear = QPushButton("清空当前字段")
-        btn_clear.setMinimumHeight(36)
+        btn_clear.setAccessibleName("清空当前字段 ROI")
         btn_clear.clicked.connect(self._clear_rects)
-        roi_btns.addWidget(btn_start)
-        roi_btns.addWidget(btn_undo)
-        roi_btns.addWidget(btn_clear)
-        editor_card_lay.addLayout(roi_btns)
+        for widget in (btn_start, btn_undo, btn_clear):
+            roi_btns.add_widget(widget)
+        editor_card_lay.addWidget(roi_btns)
 
         self._roi_list = QListWidget()
-        self._roi_list.setMinimumHeight(96)
-        self._roi_list.setMaximumHeight(156)
+        self._roi_list.setAccessibleName("当前字段 ROI 列表")
         self._roi_list.currentRowChanged.connect(self._preview_select_row)
         roi_section = QFrame()
+        set_ui_role(roi_section, "sectionSurface")
+        roi_section.setProperty("nested", True)
         roi_section_lay = QVBoxLayout(roi_section)
         roi_section_lay.setContentsMargins(0, 0, 0, 0)
         roi_section_lay.setSpacing(8)
         roi_title = QLabel("当前字段 ROI")
-        roi_title.setStyleSheet("color:#0f172a;font-weight:700;")
+        set_ui_role(roi_title, "sectionTitle")
         roi_section_lay.addWidget(roi_title)
         roi_section_lay.addWidget(self._roi_list)
         editor_card_lay.addWidget(roi_section)
 
-        io_btns = QHBoxLayout()
+        io_btns = ActionBar()
+        io_btns.setAccessibleName("配置保存工具栏")
         btn_save_field = QPushButton("保存当前字段到配置")
-        btn_save_field.setMinimumHeight(36)
+        btn_save_field.setAccessibleName("保存当前字段到配置")
         btn_save_field.clicked.connect(self._save_current_field)
         btn_save_all = QPushButton("写回 YAML")
-        btn_save_all.setMinimumHeight(36)
+        btn_save_all.setAccessibleName("写回 YAML 配置")
+        btn_save_all.setToolTip("将当前 ROI 修改写回 YAML")
         set_primary(btn_save_all)
         btn_save_all.clicked.connect(self._save_yaml)
-        io_btns.addWidget(btn_save_field)
-        io_btns.addWidget(btn_save_all)
-        editor_card_lay.addLayout(io_btns)
+        for widget in (btn_save_field, btn_save_all):
+            io_btns.add_widget(widget)
+        editor_card_lay.addWidget(io_btns)
         left_lay.addWidget(editor_card, 1)
 
         splitter.addWidget(left_scroll)
@@ -477,35 +361,42 @@ class RoiConfigEditorPage(BaseToolPage):
         right_lay.setContentsMargins(16, 16, 16, 16)
         right_lay.setSpacing(8)
 
-        topbar = QHBoxLayout()
+        topbar = ActionBar()
+        topbar.setAccessibleName("ROI 预览操作工具栏")
         self._btn_toggle_sidebar = QPushButton("收起侧栏")
-        self._btn_toggle_sidebar.setMinimumHeight(36)
+        self._btn_toggle_sidebar.setAccessibleName("收起或展开 ROI 侧栏")
+        self._btn_toggle_sidebar.setToolTip("切换 ROI 配置侧栏")
         self._btn_toggle_sidebar.clicked.connect(self._toggle_left_panel)
-        topbar.addWidget(self._btn_toggle_sidebar)
+        topbar.add_widget(self._btn_toggle_sidebar)
         self._btn_save_quick = QPushButton("保存配置")
-        self._btn_save_quick.setMinimumHeight(36)
+        self._btn_save_quick.setAccessibleName("保存 ROI 配置")
+        self._btn_save_quick.setToolTip("将当前 ROI 修改写回 YAML")
         set_primary(self._btn_save_quick)
         self._btn_save_quick.clicked.connect(self._save_yaml)
-        topbar.addWidget(self._btn_save_quick)
+        topbar.add_widget(self._btn_save_quick)
         self._image_meta = QLabel("当前样本：未加载")
-        self._image_meta.setStyleSheet("color:#475569;")
+        set_ui_role(self._image_meta, "muted")
+        self._image_meta.setAccessibleName("当前样本信息")
         self._image_meta.setWordWrap(True)
-        topbar.addWidget(self._image_meta, 1)
-        right_lay.addLayout(topbar)
+        topbar.add_widget(self._image_meta)
+        right_lay.addWidget(topbar)
 
         self._preview = ZoomableLabel()
-        self._preview.setMinimumHeight(240)
+        self._preview.setAccessibleName("ROI 编辑预览画布")
+        self._preview.setToolTip("拖动 ROI 可移动，拖四角可缩放")
         self._preview.rectSelected.connect(self._on_rects_changed)
         self._preview.rectsChanged.connect(self._on_rects_changed)
         self._preview.rectSelectionChanged.connect(self._sync_selected_roi_row)
         right_lay.addWidget(self._preview, 1)
 
         self._status = QLabel("请先加载 YAML 配置。")
-        self._status.setStyleSheet("color:#64748b;")
+        set_ui_role(self._status, "muted")
+        self._status.setAccessibleName("ROI 配置状态")
         right_lay.addWidget(self._status)
 
         splitter.addWidget(right)
-        splitter.setSizes([420, 960])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
         lay.addWidget(splitter, 1)
         self._side_combo.currentIndexChanged.connect(self._on_side_changed)
 
@@ -595,13 +486,13 @@ class RoiConfigEditorPage(BaseToolPage):
             self._sample_image_bar.setToolTip(path)
             self._sample_image_meta.setText(f"{self._current_image_side.upper()} · {path}")
             self._select_badge.setText("已选择")
-            self._select_badge.setStyleSheet("background:#E3EEE7;color:#356848;border:1px solid #C8D8CE;border-radius:2px;padding:2px 7px;font-weight:700;")
+            self._select_badge.setStyleSheet(status_badge_stylesheet("success"))
         else:
             self._sample_image_bar.setText("未选择图片")
             self._sample_image_bar.setToolTip("")
             self._sample_image_meta.setText("请选择一张图片作为当前编辑底图。")
             self._select_badge.setText("未选择")
-            self._select_badge.setStyleSheet("background:#E9EBED;color:#555D64;border:1px solid #CFD3D7;border-radius:2px;padding:2px 7px;font-weight:700;")
+            self._select_badge.setStyleSheet(status_badge_stylesheet("neutral"))
 
     def _refresh_field_list(self):
         side = self._current_image_side

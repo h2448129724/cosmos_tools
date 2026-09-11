@@ -1,43 +1,86 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Callable
 from weakref import ref
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
+
+from .task_ledger import TaskLedger, TaskRecord, TaskStatus
+from .task_presentation import TaskPresentation, present_task
+
+__all__ = ["TaskCenter", "TaskLedger", "TaskRecord", "TaskPresentation", "TaskStatus"]
 
 
-class TaskStatus(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    BUSINESS_NG = "business_ng"
-    FAILED = "failed"
-    STOPPED = "stopped"
+class _TrainingTaskBridge(QObject):
+    """Queue RunManager facts onto the TaskCenter object's Qt thread."""
 
+    def __init__(
+        self,
+        center: "TaskCenter",
+        manager: QObject,
+        key_for: Callable[[object], str],
+    ) -> None:
+        super().__init__(center)
+        self._center_ref = ref(center)
+        self._manager_ref = ref(manager)
+        self._key_for = key_for
 
-@dataclass(slots=True)
-class TaskRecord:
-    task_id: str
-    title: str
-    capability_key: str
-    status: TaskStatus = TaskStatus.PENDING
-    progress_current: int = 0
-    progress_total: int = 0
-    output_path: str = ""
-    logs: list[str] = field(default_factory=list)
-    cancellable: bool = False
+    @Slot(object)
+    def started(self, record: object) -> None:
+        center = self._center_ref()
+        manager = self._manager_ref()
+        if center is None or manager is None:
+            return
+        run_id = str(getattr(record, "run_id"))
+        title = (
+            f"{getattr(record, 'action_display_name', '运行')} · "
+            f"{getattr(record, 'feature_name', '')}"
+        )
+        stop_run = getattr(manager, "stop_run", None)
 
-    @property
-    def progress_text(self) -> str:
-        if self.progress_total > 0:
-            return f"{self.progress_current}/{self.progress_total}"
-        return ""
+        def cancel(target: str = run_id, manager_ref=self._manager_ref) -> None:
+            current_manager = manager_ref()
+            current_stop = getattr(current_manager, "stop_run", None)
+            if callable(current_stop):
+                current_stop(target)
+
+        center.start(
+            run_id,
+            title,
+            self._key_for(record),
+            str(getattr(record, "artifacts_dir", "") or getattr(record, "output_dir", "")),
+            cancel=cancel if callable(stop_run) else None,
+        )
+
+    @Slot(str, str, str)
+    def logged(self, run_id: str, stream: str, line: str) -> None:
+        center = self._center_ref()
+        if center is not None:
+            center.log(str(run_id), line, stream)
+
+    @Slot(object)
+    def finished(self, record: object) -> None:
+        center = self._center_ref()
+        if center is None:
+            return
+        raw_status = str(getattr(record, "status", "failed"))
+        status = {
+            "success": TaskStatus.SUCCESS,
+            "business_ng": TaskStatus.BUSINESS_NG,
+            "stopped": TaskStatus.STOPPED,
+            "failed": TaskStatus.FAILED,
+        }.get(raw_status, TaskStatus.FAILED)
+        output = str(getattr(record, "artifacts_dir", "") or getattr(record, "output_dir", ""))
+        center.finish(str(getattr(record, "run_id")), status, output)
 
 
 class TaskCenter(QObject):
-    """One task interface for progress, logs, history, cancellation, and artifacts."""
+    """Imperative shell around the pure :class:`TaskLedger`.
+
+    Qt signals and cancellation callbacks are deliberately kept here.  Every
+    state mutation replaces the immutable ledger with a new value, so records
+    previously handed to consumers remain stable snapshots.
+    """
 
     changed = Signal()
     task_started = Signal(object)
@@ -45,20 +88,30 @@ class TaskCenter(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._tasks: dict[str, TaskRecord] = {}
-        self._bound_managers: set[int] = set()
+        self._ledger = TaskLedger.empty()
+        self._training_bridges: dict[int, _TrainingTaskBridge] = {}
         self._cancel_callbacks: dict[str, Callable[[], None]] = {}
 
     @property
     def tasks(self) -> tuple[TaskRecord, ...]:
-        return tuple(reversed(tuple(self._tasks.values())))
+        return self._ledger.tasks
 
     @property
     def active_count(self) -> int:
-        return sum(item.status == TaskStatus.RUNNING for item in self._tasks.values())
+        return self._ledger.active_count
+
+    @property
+    def presentations(self) -> tuple[TaskPresentation, ...]:
+        """UI-ready projections in the same newest-first order as ``tasks``."""
+
+        return tuple(present_task(task) for task in self.tasks)
 
     def get(self, task_id: str) -> TaskRecord | None:
-        return self._tasks.get(task_id)
+        return self._ledger.get(task_id)
+
+    def presentation(self, task_id: str) -> TaskPresentation | None:
+        task = self.get(task_id)
+        return present_task(task) if task is not None else None
 
     def start(
         self,
@@ -68,56 +121,56 @@ class TaskCenter(QObject):
         output_path: str = "",
         cancel: Callable[[], None] | None = None,
     ) -> TaskRecord:
-        task = TaskRecord(
+        # A repeated ID replaces the record in-place.  Explicitly clearing the
+        # callback when cancel is omitted avoids stale cancellation handles.
+        self._cancel_callbacks.pop(task_id, None)
+        if cancel is not None:
+            self._cancel_callbacks[task_id] = cancel
+        self._ledger = self._ledger.start(
             task_id,
             title,
             capability_key,
-            TaskStatus.RUNNING,
-            output_path=output_path,
+            output_path,
             cancellable=cancel is not None,
         )
-        self._tasks[task_id] = task
-        if cancel is not None:
-            self._cancel_callbacks[task_id] = cancel
+        task = self._ledger.get(task_id)
+        assert task is not None
         self.changed.emit()
         self.task_started.emit(task)
         return task
 
     def cancel(self, task_id: str) -> bool:
-        task = self._tasks.get(task_id)
         callback = self._cancel_callbacks.get(task_id)
-        if task is None or task.status != TaskStatus.RUNNING or callback is None:
+        if not self._ledger.can_cancel(task_id) or callback is None:
             return False
+        # Consume the callback and publish CANCELLING before invoking any
+        # external effect.  This makes repeated clicks harmless, and lets the
+        # UI disable its stop action immediately even if the bridge is slow.
+        self._cancel_callbacks.pop(task_id, None)
+        self._ledger = self._ledger.request_cancel(task_id)
+        self.changed.emit()
         callback()
         return True
 
     def progress(self, task_id: str, current: int, total: int) -> None:
-        task = self._tasks.get(task_id)
-        if task is None:
+        if self._ledger.get(task_id) is None:
             return
-        task.progress_current = max(0, int(current))
-        task.progress_total = max(0, int(total))
+        self._ledger = self._ledger.progress(task_id, current, total)
         self.changed.emit()
 
     def log(self, task_id: str, line: str, stream: str = "stdout") -> None:
-        task = self._tasks.get(task_id)
-        if task is None:
+        if self._ledger.get(task_id) is None:
             return
-        prefix = "[stderr] " if stream == "stderr" else ""
-        task.logs.append(prefix + line.rstrip())
-        if len(task.logs) > 2000:
-            del task.logs[:-2000]
+        self._ledger = self._ledger.log(task_id, line, stream)
         self.changed.emit()
 
     def finish(self, task_id: str, status: TaskStatus, output_path: str = "") -> None:
-        task = self._tasks.get(task_id)
-        if task is None:
+        if self._ledger.get(task_id) is None:
             return
-        task.status = status
-        task.cancellable = False
+        self._ledger = self._ledger.finish(task_id, status, output_path)
         self._cancel_callbacks.pop(task_id, None)
-        if output_path:
-            task.output_path = output_path
+        task = self._ledger.get(task_id)
+        assert task is not None
         self.changed.emit()
         self.task_finished.emit(task)
 
@@ -129,47 +182,11 @@ class TaskCenter(QObject):
         """Adapt trainer RunManager signals into the shared task interface."""
 
         identity = id(manager)
-        if identity in self._bound_managers:
+        if identity in self._training_bridges:
             return
-        self._bound_managers.add(identity)
         key_for = capability_key or (lambda record: f"training.{getattr(record, 'feature_name', 'unknown')}")
-        center_ref = ref(self)
-
-        def started(record) -> None:
-            center = center_ref()
-            if center is None:
-                return
-            run_id = str(record.run_id)
-            title = f"{getattr(record, 'action_display_name', '运行')} · {getattr(record, 'feature_name', '')}"
-            stop_run = getattr(manager, "stop_run", None)
-            cancel = (lambda target=run_id: stop_run(target)) if callable(stop_run) else None
-            center.start(
-                run_id,
-                title,
-                key_for(record),
-                str(getattr(record, "artifacts_dir", "") or getattr(record, "output_dir", "")),
-                cancel=cancel,
-            )
-
-        def logged(run_id: str, stream: str, line: str) -> None:
-            center = center_ref()
-            if center is not None:
-                center.log(str(run_id), line, stream)
-
-        def finished(record) -> None:
-            center = center_ref()
-            if center is None:
-                return
-            raw_status = str(getattr(record, "status", "failed"))
-            status = {
-                "success": TaskStatus.SUCCESS,
-                "business_ng": TaskStatus.BUSINESS_NG,
-                "stopped": TaskStatus.STOPPED,
-                "failed": TaskStatus.FAILED,
-            }.get(raw_status, TaskStatus.FAILED)
-            output = str(getattr(record, "artifacts_dir", "") or getattr(record, "output_dir", ""))
-            center.finish(str(record.run_id), status, output)
-
-        manager.run_started.connect(started)
-        manager.log_received.connect(logged)
-        manager.run_finished.connect(finished)
+        bridge = _TrainingTaskBridge(self, manager, key_for)
+        self._training_bridges[identity] = bridge
+        manager.run_started.connect(bridge.started)
+        manager.log_received.connect(bridge.logged)
+        manager.run_finished.connect(bridge.finished)

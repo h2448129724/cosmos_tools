@@ -7,26 +7,19 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QVBoxLayout,
+    QFileDialog, QLabel, QMessageBox, QPushButton, QSplitter,
+    QSizePolicy, QVBoxLayout,
 )
 
 from apps.data_tools.processing.image_io import read_image
 from ..preview_widget import ZoomableLabel, cv2_to_qpixmap
+from cosmos_toolbox.ui.primitives import ActionBar, PathField, SectionSurface, set_ui_role
 from .base import (
-    BaseToolPage, make_card, make_log_box, make_log_card,
+    BaseToolPage, make_log_box, make_log_card,
     make_page_header, set_primary,
 )
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
-
-_REJECT_BTN_STYLE = (
-    "QPushButton{background:#DC2626;color:#fff;border:none;border-radius:6px;"
-    "padding:6px 16px;font-weight:600;}"
-    "QPushButton:hover{background:#B91C1C;}"
-    "QPushButton:pressed{background:#991B1B;}"
-)
-
 
 class ImageFilterPage(BaseToolPage):
     tool_key = "image_filter"
@@ -59,96 +52,79 @@ class ImageFilterPage(BaseToolPage):
             "数据筛选", "逐张浏览图片，用键盘快速筛选。保留的移入 kept/，淘汰的移入 rejected/，均可恢复。"
         ))
 
-        main_row = QHBoxLayout()
-        main_row.setSpacing(12)
-
-        # ---- left card: preview workspace ----
-        left = make_card()
-        left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(18, 18, 18, 18)
+        # ---- left workspace ----
+        left = SectionSurface("预览与筛选", "使用键盘或按钮处理当前图片。")
+        left_lay = left.body_layout
         left_lay.setSpacing(10)
 
-        info_row = QHBoxLayout()
         self._current_name = QLabel("当前图片：未加载")
-        self._current_name.setStyleSheet("color:#0f172a;font-size:15px;font-weight:700;")
+        set_ui_role(self._current_name, "sectionTitle")
+        self._current_name.setAccessibleName("当前图片")
         self._current_name.setWordWrap(True)
-        info_row.addWidget(self._current_name, 1)
         self._nav_hint = QLabel("A 前一张 / D 后一张 / W 淘汰 / S 保留 / Z 撤销淘汰")
-        self._nav_hint.setStyleSheet("color:#64748b;font-size:12px;")
-        info_row.addWidget(self._nav_hint)
-        left_lay.addLayout(info_row)
+        set_ui_role(self._nav_hint, "muted")
+        left_lay.addWidget(self._current_name)
+        left_lay.addWidget(self._nav_hint)
 
         self._preview_meta = QLabel("加载图片目录后可开始筛选。")
-        self._preview_meta.setStyleSheet("color:#64748b;")
+        set_ui_role(self._preview_meta, "muted")
+        self._preview_meta.setAccessibleName("预览信息")
         left_lay.addWidget(self._preview_meta)
 
         self._preview = ZoomableLabel()
-        self._preview.setMinimumHeight(420)
+        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._preview.setAccessibleName("图片预览画布")
         left_lay.addWidget(self._preview, 1)
 
-        nav_btns = QHBoxLayout()
-        nav_btns.setSpacing(8)
+        nav_btns = ActionBar()
         b_prev = QPushButton("上一张(A)")
+        b_prev.setAccessibleName("上一张图片")
         b_prev.clicked.connect(lambda: self._show_offset(-1))
         b_next = QPushButton("下一张(D)")
+        b_next.setAccessibleName("下一张图片")
         b_next.clicked.connect(lambda: self._show_offset(+1))
-        nav_btns.addWidget(b_prev)
-        nav_btns.addWidget(b_next)
-        nav_btns.addStretch(1)
-        left_lay.addLayout(nav_btns)
+        nav_btns.add_widget(b_prev)
+        nav_btns.add_widget(b_next)
+        left_lay.addWidget(nav_btns)
 
-        action_btns = QHBoxLayout()
-        action_btns.setSpacing(8)
+        action_btns = ActionBar()
         b_reject = QPushButton("淘汰(W)")
-        b_reject.setStyleSheet(_REJECT_BTN_STYLE)
+        b_reject.setProperty("buttonRole", "danger")
+        b_reject.setAccessibleName("淘汰当前图片")
         b_reject.clicked.connect(self._reject_current)
         b_keep = QPushButton("保留(S)")
+        b_keep.setAccessibleName("保留当前图片")
         set_primary(b_keep)
         b_keep.clicked.connect(self._keep_current)
-        action_btns.addWidget(b_reject)
-        action_btns.addWidget(b_keep)
-        action_btns.addStretch(1)
+        action_btns.add_widget(b_reject)
+        action_btns.add_widget(b_keep)
         b_undo = QPushButton("撤销淘汰(Z)")
+        b_undo.setAccessibleName("撤销上次淘汰")
         b_undo.clicked.connect(self._undo_last_reject)
-        action_btns.addWidget(b_undo)
-        left_lay.addLayout(action_btns)
+        action_btns.add_widget(b_undo)
+        left_lay.addWidget(action_btns)
 
-        main_row.addWidget(left, 1)
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setChildrenCollapsible(False)
+        main_splitter.addWidget(left)
 
         # ---- right card: status panel ----
-        right = make_card()
-        right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(16, 16, 16, 16)
+        right = SectionSurface("筛选统计", "目录、处理进度与恢复操作。")
+        right_lay = right.body_layout
         right_lay.setSpacing(10)
-        right.setFixedWidth(280)
+        right.setMinimumWidth(250)
+        right.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
-        dir_row = QHBoxLayout()
-        dir_row.setSpacing(10)
-        dir_label = QLabel("图片目录")
-        dir_label.setFixedWidth(72)
-        dir_row.addWidget(dir_label)
-        self._dir_entry = QLineEdit()
-        dir_row.addWidget(self._dir_entry, 1)
-        btn_browse = QPushButton("浏览")
-        btn_browse.setFixedWidth(60)
-        btn_browse.clicked.connect(self._pick_dir)
-        dir_row.addWidget(btn_browse)
-        right_lay.addLayout(dir_row)
+        directory_field = PathField("图片目录", placeholder="选择图片目录")
+        directory_field.browse_requested.connect(self._pick_dir)
+        self._dir_entry = directory_field.line_edit
+        right_lay.addWidget(directory_field)
 
         b_load = QPushButton("加载目录")
+        b_load.setAccessibleName("加载图片目录")
         set_primary(b_load)
         b_load.clicked.connect(self._load_folder)
         right_lay.addWidget(b_load)
-
-        # divider
-        div = QLabel("")
-        div.setFixedHeight(1)
-        div.setStyleSheet("background:#E5E7EB;")
-        right_lay.addWidget(div)
-
-        stat_title = QLabel("筛选统计")
-        stat_title.setStyleSheet("color:#111827;font-size:15px;font-weight:700;")
-        right_lay.addWidget(stat_title)
 
         self._stat_total = QLabel("总图片数：0")
         self._stat_progress = QLabel("已处理：0 / 0")
@@ -157,25 +133,31 @@ class ImageFilterPage(BaseToolPage):
         self._stat_remaining = QLabel("剩余：0")
         for lbl in (self._stat_total, self._stat_progress, self._stat_kept,
                      self._stat_rejected, self._stat_remaining):
-            lbl.setStyleSheet("color:#475569;")
+            set_ui_role(lbl, "muted")
             right_lay.addWidget(lbl)
 
         self._stat_state = QLabel("当前状态：待加载")
-        self._stat_state.setStyleSheet("color:#64748b;font-size:12px;")
+        set_ui_role(self._stat_state, "muted")
+        self._stat_state.setAccessibleName("筛选状态")
         right_lay.addWidget(self._stat_state)
 
         right_lay.addStretch(1)
 
         b_recover_kept = QPushButton("恢复已保留（kept）")
+        b_recover_kept.setAccessibleName("恢复已保留图片")
         b_recover_kept.clicked.connect(lambda: self._recover_from(self._kept_dir, "保留"))
         right_lay.addWidget(b_recover_kept)
 
         b_recover_rejected = QPushButton("恢复已淘汰（rejected）")
+        b_recover_rejected.setAccessibleName("恢复已淘汰图片")
         b_recover_rejected.clicked.connect(lambda: self._recover_from(self._rejected_dir, "淘汰"))
         right_lay.addWidget(b_recover_rejected)
 
-        main_row.addWidget(right, 0)
-        lay.addLayout(main_row, 1)
+        main_splitter.addWidget(right)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([760, 300])
+        lay.addWidget(main_splitter, 1)
 
         self._log = make_log_box("运行日志...")
         lay.addWidget(make_log_card(self._log))

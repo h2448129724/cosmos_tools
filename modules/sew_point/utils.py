@@ -9,6 +9,11 @@ import os
 import cv2
 import numpy as np
 
+try:
+    from .inference_core import detect_peaks  # noqa: F401
+except ImportError:  # direct script compatibility
+    from inference_core import detect_peaks  # noqa: F401
+
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 
@@ -40,36 +45,6 @@ def to_bgr(image):
     if image.shape[2] == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     return image
-
-
-def detect_peaks(heatmap, threshold=0.5, cluster_dist=3):
-    """在热力图中找局部最大值，层级聚类去重。返回 [(x, y, score), ...]。"""
-    from scipy.ndimage import maximum_filter
-
-    hm = heatmap.squeeze()
-    local_max = maximum_filter(hm, size=5)
-    peaks = (hm == local_max) & (hm > threshold)
-    ys, xs = np.where(peaks)
-    scores = hm[ys, xs]
-
-    if len(xs) == 0:
-        return []
-    if len(xs) == 1:
-        return [(int(xs[0]), int(ys[0]), float(scores[0]))]
-
-    from scipy.cluster.hierarchy import fcluster, linkage
-
-    coords = np.stack([xs, ys], axis=1).astype(np.float64)
-    Z = linkage(coords, method="complete", metric="euclidean")
-    labels = fcluster(Z, t=cluster_dist, criterion="distance")
-
-    kept = []
-    for cid in np.unique(labels):
-        mask = labels == cid
-        idx = np.argmax(scores[mask])
-        best = np.where(mask)[0][idx]
-        kept.append((int(xs[best]), int(ys[best]), float(scores[best])))
-    return kept
 
 
 def iter_tiles(h, w, tile_size, stride):

@@ -6,19 +6,21 @@ from uuid import uuid4
 
 import cv2
 from PySide6.QtCore import QSize, QThread, Qt, Signal
-from PySide6.QtGui import QImageReader, QPixmap
+from PySide6.QtGui import QImageReader, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -39,6 +41,7 @@ from .capabilities import CapabilityRuntime
 from .paths import COSMOS_ROOT
 from .project_context import ProjectState
 from .task_center import TaskStatus
+from .ui.primitives import ActionBar, SectionSurface, StatusBanner
 
 
 _MAX_PREVIEW_DIMENSION = 4096
@@ -102,20 +105,8 @@ class _TemplateWorker(QThread):
 
 
 def _card(title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
-    frame = QFrame()
-    frame.setObjectName("cabfCard")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(16, 14, 16, 14)
-    layout.setSpacing(9)
-    title_label = QLabel(title)
-    title_label.setObjectName("cabfCardTitle")
-    layout.addWidget(title_label)
-    if subtitle:
-        subtitle_label = QLabel(subtitle)
-        subtitle_label.setObjectName("cabfCardSubtitle")
-        subtitle_label.setWordWrap(True)
-        layout.addWidget(subtitle_label)
-    return frame, layout
+    surface = SectionSurface(title, subtitle)
+    return surface, surface.body_layout
 
 
 class CabfConfigActivity(QWidget):
@@ -191,44 +182,47 @@ class CabfConfigActivity(QWidget):
             "CAB-F 配置上下文",
             "先选择产品 YAML 和初始原图；工具会同时生成全尺寸校准基准图和半尺寸匹配模板。",
         )
-        config_row = QHBoxLayout()
-        config_row.setSpacing(8)
+        config_row = ActionBar()
         self.config_edit = QLineEdit()
         self.config_edit.setPlaceholderText("选择 conf/CAB-F 下的产品配置")
-        config_row.addWidget(self.config_edit, 1)
+        self.config_edit.setAccessibleName("CAB-F 产品配置")
+        self.config_edit.setMinimumWidth(280)
+        config_row.add_widget(self.config_edit)
         browse_config = QPushButton("选择配置")
         browse_config.clicked.connect(self._pick_config)
-        config_row.addWidget(browse_config)
+        config_row.add_widget(browse_config)
         load_config = QPushButton("加载")
         load_config.setProperty("buttonRole", "primary")
         load_config.clicked.connect(self._load_config)
-        config_row.addWidget(load_config)
-        context_layout.addLayout(config_row)
+        config_row.add_widget(load_config)
+        context_layout.addWidget(config_row)
 
-        context_controls = QHBoxLayout()
-        context_controls.setSpacing(10)
+        context_controls = ActionBar()
         self.product_badge = QLabel("尚未加载配置")
         self.product_badge.setObjectName("cabfBadge")
-        context_controls.addWidget(self.product_badge)
-        context_controls.addWidget(QLabel("侧别"))
+        context_controls.add_widget(self.product_badge)
+        context_controls.add_widget(QLabel("侧别"))
         self.side_combo = QComboBox()
         self.side_combo.addItem("TOP", "top")
         self.side_combo.addItem("BOTTOM", "bottom")
         self.side_combo.currentIndexChanged.connect(self._switch_side)
-        context_controls.addWidget(self.side_combo)
+        self.side_combo.setAccessibleName("CAB-F 侧别")
+        context_controls.add_widget(self.side_combo)
         self.source_edit = QLineEdit()
         self.source_edit.setReadOnly(True)
         self.source_edit.setPlaceholderText("请选择当前侧别的初始原图")
-        context_controls.addWidget(self.source_edit, 1)
+        self.source_edit.setAccessibleName("当前侧别初始原图")
+        self.source_edit.setMinimumWidth(280)
+        context_controls.add_widget(self.source_edit)
         choose_source = QPushButton("选择初始原图")
         choose_source.clicked.connect(self._pick_source)
-        context_controls.addWidget(choose_source)
-        context_layout.addLayout(context_controls)
+        context_controls.add_widget(choose_source)
+        context_layout.addWidget(context_controls)
         layout.addWidget(context_card)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(7)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(True)
+        self.splitter.setHandleWidth(7)
 
         fields_card, fields_layout = _card("ROI 字段", "按 TOP/BOTTOM 自动筛选 YAML 中的 roi / rois。")
         self.field_list = QListWidget()
@@ -238,25 +232,40 @@ class CabfConfigActivity(QWidget):
         self.field_summary.setObjectName("cabfMuted")
         self.field_summary.setWordWrap(True)
         fields_layout.addWidget(self.field_summary)
-        splitter.addWidget(fields_card)
+        self.fields_panel = fields_card
+        self.splitter.addWidget(fields_card)
 
         canvas_card, canvas_layout = _card("统一画布")
-        canvas_toolbar = QHBoxLayout()
-        canvas_toolbar.addWidget(QLabel("图层"))
+        canvas_toolbar = ActionBar()
+        self.fields_toggle = QPushButton("ROI 字段")
+        self.fields_toggle.setCheckable(True)
+        self.fields_toggle.setAccessibleName("显示 ROI 字段面板")
+        self.fields_toggle.toggled.connect(lambda visible: self._show_compact_panel("fields", visible))
+        self.fields_toggle.hide()
+        canvas_toolbar.add_widget(self.fields_toggle)
+        self.inspector_toggle = QPushButton("配置检查")
+        self.inspector_toggle.setCheckable(True)
+        self.inspector_toggle.setAccessibleName("显示配置检查面板")
+        self.inspector_toggle.toggled.connect(
+            lambda visible: self._show_compact_panel("inspector", visible)
+        )
+        self.inspector_toggle.hide()
+        canvas_toolbar.add_widget(self.inspector_toggle)
+        canvas_toolbar.add_widget(QLabel("图层"))
         self.view_combo = QComboBox()
         self.view_combo.addItem("初始原图（输入）", "source")
         self.view_combo.addItem("校准基准图 + YAML ROI", "reference")
         self.view_combo.addItem("匹配模板", "template")
         self.view_combo.currentIndexChanged.connect(self._rebuild_canvas)
-        canvas_toolbar.addWidget(self.view_combo)
+        self.view_combo.setAccessibleName("画布图层")
+        canvas_toolbar.add_widget(self.view_combo)
         fit_button = QPushButton("适应窗口")
         fit_button.clicked.connect(self._fit_canvas)
-        canvas_toolbar.addWidget(fit_button)
-        canvas_toolbar.addStretch(1)
+        canvas_toolbar.add_widget(fit_button)
         self.canvas_badge = QLabel("未选择原图")
         self.canvas_badge.setObjectName("cabfBadge")
-        canvas_toolbar.addWidget(self.canvas_badge)
-        canvas_layout.addLayout(canvas_toolbar)
+        canvas_toolbar.add_widget(self.canvas_badge)
+        canvas_layout.addWidget(canvas_toolbar)
         self.preview = ZoomableLabel()
         self.preview.setObjectName("cabfCanvas")
         self.preview.rectsChanged.connect(self._sync_rects_from_canvas)
@@ -266,9 +275,27 @@ class CabfConfigActivity(QWidget):
         self.canvas_meta.setObjectName("cabfMuted")
         self.canvas_meta.setWordWrap(True)
         canvas_layout.addWidget(self.canvas_meta)
-        splitter.addWidget(canvas_card)
+        self.canvas_panel = canvas_card
+        self.splitter.addWidget(canvas_card)
 
-        inspector_card, inspector_layout = _card("配置检查", "修改发生在内存中，点击保存后才写回 YAML。")
+        inspector_card, inspector_surface_layout = _card(
+            "配置检查",
+            "修改发生在内存中，点击保存后才写回 YAML。",
+        )
+        self.inspector_scroll = QScrollArea()
+        self.inspector_scroll.setObjectName("cabfInspectorScroll")
+        self.inspector_scroll.setWidgetResizable(True)
+        self.inspector_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.inspector_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inspector_content = QWidget()
+        inspector_layout = QVBoxLayout(inspector_content)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.setSpacing(8)
+        inspector_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.inspector_scroll.setWidget(inspector_content)
+        inspector_surface_layout.addWidget(self.inspector_scroll, 1)
         template_form = QFormLayout()
         template_form.setContentsMargins(0, 0, 0, 0)
         self.model_label = QLabel("由 assets/config/backend_config.yaml 自动读取")
@@ -280,6 +307,16 @@ class CabfConfigActivity(QWidget):
         self.reference_path_label = QLabel("尚未生成")
         self.reference_path_label.setWordWrap(True)
         self.reference_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        for value_label in (
+            self.model_label,
+            self.template_path_label,
+            self.reference_path_label,
+        ):
+            value_label.setMinimumWidth(0)
+            value_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
         template_form.addRow("胶体模型", self.model_label)
         template_form.addRow("校准基准图", self.reference_path_label)
         template_form.addRow("匹配模板", self.template_path_label)
@@ -293,7 +330,7 @@ class CabfConfigActivity(QWidget):
         self.image_purpose_label.setWordWrap(True)
         inspector_layout.addWidget(self.image_purpose_label)
 
-        template_actions = QHBoxLayout()
+        template_actions = ActionBar()
         self.generate_button = QPushButton("生成两种图")
         self.generate_button.setProperty("buttonRole", "primary")
         self.generate_button.clicked.connect(self._generate_template)
@@ -303,11 +340,15 @@ class CabfConfigActivity(QWidget):
         self.save_template_button = QPushButton("保存匹配模板")
         self.save_template_button.clicked.connect(self._save_template)
         self.save_template_button.setEnabled(False)
-        template_actions.addWidget(self.generate_button)
-        template_actions.addWidget(self.save_reference_button)
-        template_actions.addWidget(self.save_template_button)
-        inspector_layout.addLayout(template_actions)
-        self.update_config_check = QCheckBox("保存后更新 inspection.match_template")
+        template_actions.add_widget(self.generate_button)
+        template_actions.add_widget(self.save_reference_button)
+        template_actions.add_widget(self.save_template_button)
+        inspector_layout.addWidget(template_actions)
+        self.update_config_check = QCheckBox("保存后更新模板路径")
+        self.update_config_check.setToolTip("保存后更新 inspection.match_template")
+        self.update_config_check.setAccessibleDescription(
+            "保存后更新 inspection.match_template"
+        )
         self.update_config_check.setChecked(True)
         inspector_layout.addWidget(self.update_config_check)
 
@@ -315,9 +356,10 @@ class CabfConfigActivity(QWidget):
         roi_title.setObjectName("cabfSectionTitle")
         inspector_layout.addWidget(roi_title)
         self.roi_list = QListWidget()
+        self.roi_list.setMinimumHeight(96)
         self.roi_list.currentRowChanged.connect(self._select_roi)
         inspector_layout.addWidget(self.roi_list, 1)
-        roi_actions = QHBoxLayout()
+        roi_actions = ActionBar()
         self.edit_roi_button = QPushButton("启用画布编辑")
         self.edit_roi_button.setCheckable(True)
         self.edit_roi_button.toggled.connect(self._toggle_roi_editing)
@@ -326,10 +368,10 @@ class CabfConfigActivity(QWidget):
         clear_roi = QPushButton("清空字段")
         clear_roi.setProperty("buttonRole", "danger")
         clear_roi.clicked.connect(self._clear_current_roi)
-        roi_actions.addWidget(self.edit_roi_button)
-        roi_actions.addWidget(delete_roi)
-        roi_actions.addWidget(clear_roi)
-        inspector_layout.addLayout(roi_actions)
+        roi_actions.add_widget(self.edit_roi_button)
+        roi_actions.add_widget(delete_roi)
+        roi_actions.add_widget(clear_roi)
+        inspector_layout.addWidget(roi_actions)
         self.save_roi_button = QPushButton("保存 ROI 到当前 YAML")
         self.save_roi_button.clicked.connect(self._save_rois)
         self.save_roi_button.setEnabled(False)
@@ -339,15 +381,57 @@ class CabfConfigActivity(QWidget):
         self.validation_label.setObjectName("cabfValidation")
         self.validation_label.setWordWrap(True)
         inspector_layout.addWidget(self.validation_label)
-        splitter.addWidget(inspector_card)
+        self.inspector_panel = inspector_card
+        self.splitter.addWidget(inspector_card)
 
-        splitter.setSizes([260, 790, 360])
-        layout.addWidget(splitter, 1)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 4)
+        self.splitter.setStretchFactor(2, 2)
+        self.splitter.setSizes([260, 790, 360])
+        layout.addWidget(self.splitter, 1)
 
-        self.status_label = QLabel("准备就绪。")
-        self.status_label.setObjectName("cabfStatus")
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        self.status_banner = StatusBanner("准备就绪。")
+        self.status_label = self.status_banner.label
+        layout.addWidget(self.status_banner)
+        self._compact_mode = False
+
+    def _show_compact_panel(self, panel: str, visible: bool) -> None:
+        if not self._compact_mode:
+            return
+        if panel == "fields":
+            self.fields_panel.setVisible(visible)
+            if visible:
+                blocked = self.inspector_toggle.blockSignals(True)
+                self.inspector_toggle.setChecked(False)
+                self.inspector_toggle.blockSignals(blocked)
+                self.inspector_panel.hide()
+        else:
+            self.inspector_panel.setVisible(visible)
+            if visible:
+                blocked = self.fields_toggle.blockSignals(True)
+                self.fields_toggle.setChecked(False)
+                self.fields_toggle.blockSignals(blocked)
+                self.fields_panel.hide()
+
+    def _set_compact_mode(self, compact: bool) -> None:
+        if compact == self._compact_mode:
+            return
+        self._compact_mode = compact
+        self.fields_toggle.setVisible(compact)
+        self.inspector_toggle.setVisible(compact)
+        if compact:
+            self.fields_panel.hide()
+            self.inspector_panel.hide()
+            self.fields_toggle.setChecked(False)
+            self.inspector_toggle.setChecked(False)
+        else:
+            self.fields_panel.show()
+            self.inspector_panel.show()
+            self.splitter.setSizes([260, 790, 360])
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._set_compact_mode(event.size().width() < 1180)
 
     def _pick_config(self) -> None:
         start = self.config_edit.text().strip() or str(COSMOS_ROOT / "conf" / "CAB-F")

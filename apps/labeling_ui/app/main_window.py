@@ -9,22 +9,15 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
-    QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
+    QStatusBar, QVBoxLayout, QWidget,
 )
 
 from apps.cabf_flow.config_model import load_config
 from apps.cabf_flow.flow import CONFIG_PATH
 
-from .project_registry import get_registered_projects
 from .tools.workflow_page import StitchWorkflowPage
-from .tools.keyword_split_page import KeywordSplitPage
-from .tools.batch_crop_page import BatchCropPage
-from .tools.tile_crop_page import AutoTileCropPage
-from .tools.roi_editor_page import RoiConfigEditorPage
-from .tools.image_filter_page import ImageFilterPage
-from .tools.inner_mask_page import InnerMaskPage
-from .tools.label_visualization_page import LabelVisualizationPage
 from .theme import APP_STYLESHEET, TOKENS
+from .workspace_page import LabelingWorkspacePage
 STYLESHEET = APP_STYLESHEET
 
 
@@ -35,7 +28,7 @@ class MainWindow(QMainWindow):
         self.config_data = load_config(self.config_path)
         self._project_context = None
         self._project_state = None
-        self._project_tool_registry = get_registered_projects()
+        self._project_tool_registry = ()
         self._sidebar_visible = True
         self._sidebar_expanded_width = 204
         self._sidebar_collapsed_width = 52
@@ -47,15 +40,12 @@ class MainWindow(QMainWindow):
         self.resize(1320, 820)
         self.setStyleSheet(APP_STYLESHEET)
 
-        self._tool_pages = [
-            KeywordSplitPage(self),
-            BatchCropPage(self),
-            AutoTileCropPage(self),
-            RoiConfigEditorPage(self),
-            InnerMaskPage(self),
-            ImageFilterPage(self),
-            LabelVisualizationPage(self),
-        ]
+        # Keep all business pages in one embeddable owner.  The standalone
+        # adapter contributes only legacy sidebar/menu/status chrome.
+        self._workspace_page = LabelingWorkspacePage(self, config_path=self.config_path)
+        self._tool_pages = self._workspace_page._tool_pages
+        self.config_data = self._workspace_page.config_data
+        self._project_tool_registry = self._workspace_page._project_tool_registry
 
         self._build_ui()
         self._build_menu()
@@ -94,10 +84,8 @@ class MainWindow(QMainWindow):
         page_surface_layout = QVBoxLayout(page_surface)
         page_surface_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.stack = QStackedWidget()
-        for page in self._tool_pages:
-            self.stack.addWidget(page)
-        page_surface_layout.addWidget(self.stack)
+        self.stack = self._workspace_page.stack
+        page_surface_layout.addWidget(self._workspace_page)
         content_layout.addWidget(page_surface, 1)
         root.addWidget(content_shell, 1)
 
@@ -300,6 +288,7 @@ class MainWindow(QMainWindow):
     def bind_workspace_router(self, router, workspace_key: str = "labeling") -> None:
         self._workspace_router = router
         self._workspace_key = workspace_key
+        self._workspace_page.bind_workspace_router(router, workspace_key=workspace_key)
         self._set_embedded_mode(True)
 
     def _set_embedded_mode(self, embedded: bool) -> None:
@@ -477,9 +466,11 @@ class MainWindow(QMainWindow):
     def bind_project_context(self, context) -> None:
         self._project_context = context
         self.apply_project_context(context.state)
+        self._workspace_page.bind_project_context(context)
 
     def apply_project_context(self, state) -> None:
         self._project_state = state
+        self._workspace_page.apply_project_context(state)
         mapping = {
             "dataset_root": state.dataset_root,
             "master_images_dir": state.image_dir,

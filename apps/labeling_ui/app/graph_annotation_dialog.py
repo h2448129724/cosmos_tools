@@ -12,24 +12,36 @@ from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QDialog,
+    QCheckBox,
     QFileDialog,
     QFormLayout,
     QFrame,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 from .autosave import AutoSaveStatusController
+from .annotation.editor_shell import AnnotationEditorShell
+from cosmos_toolbox.ui.primitives import ActionBar
 from .annotation.adapters.cabf import CabfAnnotationAdapter
+from .annotation.commands import (
+    AddPoint,
+    AnnotationState,
+    ClearEdges,
+    DeletePoint,
+    MovePoint,
+    ToggleEdge,
+    UndoLastEdge,
+    apply_edit,
+    has_edge,
+    next_point_id,
+)
 from .annotation.document import AnnotationDocument
 from cabf import (
     IMAGE_SUFFIXES,
@@ -308,7 +320,8 @@ class EdgeAnnotationCanvas(QWidget):
         return self._overlay_visible and str(layer_key) in self._visible_layer_keys
 
     def clear_edges(self):
-        self.edges = []
+        transition = apply_edit(AnnotationState(edges=self.edges), ClearEdges())
+        self.edges = transition.next_state.edges
         self.pending_start_id = None
         self.edgeCountChanged.emit(0)
         self.pendingChanged.emit(None)
@@ -319,26 +332,26 @@ class EdgeAnnotationCanvas(QWidget):
     def undo_last_edge(self):
         if not self.edges:
             return
-        removed = self.edges.pop()
+        removed = self.edges[-1]
+        transition = apply_edit(AnnotationState(edges=self.edges), UndoLastEdge())
+        self.edges = transition.next_state.edges
         self.edgeCountChanged.emit(len(self.edges))
         self.annotationModified.emit()
         self.statusMessage.emit(f"已撤销连边 {removed['src']} - {removed['dst']}")
         self.update()
 
     def _next_point_id(self) -> int:
-        if not self.points:
-            return 0
-        return max(int(point["id"]) for point in self.points) + 1
+        return next_point_id(self.points)
 
     def _remove_point_and_edges(self, point_id: int):
         point_id = int(point_id)
         before_points = len(self.points)
         before_edges = len(self.edges)
-        self.points = [point for point in self.points if int(point["id"]) != point_id]
-        self.edges = [
-            edge for edge in self.edges
-            if int(edge["src"]) != point_id and int(edge["dst"]) != point_id
-        ]
+        transition = apply_edit(
+            AnnotationState(points=self.points, edges=self.edges), DeletePoint(point_id)
+        )
+        self.points = transition.next_state.points
+        self.edges = transition.next_state.edges
         self.selected_point_id = None if self.selected_point_id == point_id else self.selected_point_id
         self.pending_start_id = None if self.pending_start_id == point_id else self.pending_start_id
         self.pointSelectionChanged.emit(None)
@@ -352,15 +365,10 @@ class EdgeAnnotationCanvas(QWidget):
         self.update()
 
     def _add_point(self, image_x: float, image_y: float):
-        point_id = self._next_point_id()
-        point = {
-            "id": point_id,
-            "x": float(image_x),
-            "y": float(image_y),
-            "score": 1.0,
-            "source": "manual",
-        }
-        self.points.append(point)
+        transition = apply_edit(AnnotationState(points=self.points), AddPoint(image_x, image_y))
+        self.points = transition.next_state.points
+        point = self.points[-1]
+        point_id = int(point["id"])
         self.selected_point_id = point_id
         self.pointSelectionChanged.emit(point)
         self.pointCountChanged.emit(len(self.points))
@@ -425,28 +433,19 @@ class EdgeAnnotationCanvas(QWidget):
         return next((p for p in self.points if int(p["id"]) == int(point_id)), None)
 
     def _has_edge(self, src: int, dst: int) -> bool:
-        key = tuple(sorted((int(src), int(dst))))
-        return any(tuple(sorted((int(edge["src"]), int(edge["dst"])))) == key for edge in self.edges)
+        return has_edge(self.edges, src, dst)
 
     def _toggle_edge(self, src: int, dst: int):
         key = tuple(sorted((int(src), int(dst))))
-        for idx, edge in enumerate(self.edges):
-            if tuple(sorted((int(edge["src"]), int(edge["dst"])))) == key:
-                self.edges.pop(idx)
-                self.edgeCountChanged.emit(len(self.edges))
-                self.annotationModified.emit()
-                self.statusMessage.emit(f"已删除连边 {key[0]} - {key[1]}")
-                self.update()
-                return
-        self.edges.append(
-            {
-                "edge_id": f"edge_{len(self.edges) + 1:04d}",
-                "src": key[0],
-                "dst": key[1],
-                "label": 1,
-                "source": "manual",
-            }
-        )
+        existed = has_edge(self.edges, *key)
+        transition = apply_edit(AnnotationState(edges=self.edges), ToggleEdge(*key))
+        self.edges = transition.next_state.edges
+        if existed:
+            self.edgeCountChanged.emit(len(self.edges))
+            self.annotationModified.emit()
+            self.statusMessage.emit(f"已删除连边 {key[0]} - {key[1]}")
+            self.update()
+            return
         self.edgeCountChanged.emit(len(self.edges))
         self.annotationModified.emit()
         self.statusMessage.emit(f"已新增连边 {key[0]} - {key[1]}")
@@ -589,10 +588,15 @@ class EdgeAnnotationCanvas(QWidget):
             return
         if self._drag_point_id is not None and self.mode == "move":
             image_x, image_y = self._canvas_to_image(event.position().toPoint())
-            point = self._find_point(self._drag_point_id)
-            if point is not None:
-                point["x"] = float(image_x)
-                point["y"] = float(image_y)
+            transition = apply_edit(
+                AnnotationState(points=self.points, edges=self.edges),
+                MovePoint(self._drag_point_id, image_x, image_y),
+            )
+            if transition.changed:
+                self.points = transition.next_state.points
+                self.edges = transition.next_state.edges
+                point = self._find_point(self._drag_point_id)
+                assert point is not None
                 self.pointSelectionChanged.emit(point)
                 self.annotationModified.emit()
                 self.update()
@@ -652,53 +656,47 @@ class StitchGraphEditorDialog(QDialog):
         self._connect_signals()
 
     def _build_ui(self):
+        self.editor_shell = AnnotationEditorShell(
+            "点边一体标注器",
+            "直接修点和修边，默认按当前文件夹顺序处理。",
+            parent=self,
+        )
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(6)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(self.editor_shell)
 
-        topbar = QHBoxLayout()
-        topbar.setSpacing(8)
         self.btn_toggle_sidebar = QPushButton("收起侧栏")
-        self.btn_toggle_sidebar.setMinimumHeight(34)
+        self.btn_toggle_sidebar.setAccessibleName("切换编辑器侧栏")
+        self.btn_toggle_sidebar.setToolTip("显示或隐藏文件、导航和状态侧栏")
         self.btn_toggle_sidebar.clicked.connect(self._toggle_left_panel)
-        topbar.addWidget(self.btn_toggle_sidebar)
-        self._title_label = QLabel("点边一体标注器")
-        self._title_label.setStyleSheet("font-size:15px;font-weight:700;color:#111827;")
-        topbar.addWidget(self._title_label)
-        self._title_desc = QLabel("直接修点和修边，默认按当前文件夹顺序处理。")
-        self._title_desc.setStyleSheet("font-size:11px;color:#6B7280;")
-        topbar.addWidget(self._title_desc)
+        self.editor_shell.add_action(self.btn_toggle_sidebar)
+        self._title_label = self.editor_shell.page_header.title_label
+        self._title_desc = self.editor_shell.page_header.description_label
         self.btn_toggle_overlay = QPushButton("隐藏标签")
         self.btn_toggle_overlay.setCheckable(True)
         self.btn_toggle_overlay.setChecked(True)
-        self.btn_toggle_overlay.setMinimumHeight(34)
-        topbar.addWidget(self.btn_toggle_overlay)
+        self.btn_toggle_overlay.setAccessibleName("显示标签覆盖层")
+        self.btn_toggle_overlay.setToolTip("显示或隐藏画布上的标签覆盖层（快捷键 H）")
+        self.editor_shell.add_action(self.btn_toggle_overlay)
         self.btn_toggle_points = QPushButton("显示点")
         self.btn_toggle_points.setCheckable(True)
         self.btn_toggle_points.setChecked(True)
-        self.btn_toggle_points.setMinimumHeight(34)
-        topbar.addWidget(self.btn_toggle_points)
+        self.btn_toggle_points.setAccessibleName("显示点图层")
+        self.btn_toggle_points.setToolTip("显示或隐藏点图层")
+        self.editor_shell.add_action(self.btn_toggle_points)
         self.btn_toggle_edges = QPushButton("显示线")
         self.btn_toggle_edges.setCheckable(True)
         self.btn_toggle_edges.setChecked(True)
-        self.btn_toggle_edges.setMinimumHeight(34)
-        topbar.addWidget(self.btn_toggle_edges)
-        topbar.addStretch(1)
-        root.addLayout(topbar)
+        self.btn_toggle_edges.setAccessibleName("显示线图层")
+        self.btn_toggle_edges.setToolTip("显示或隐藏连线图层")
+        self.editor_shell.add_action(self.btn_toggle_edges)
 
-        self.splitter = QSplitter(Qt.Horizontal)
-        root.addWidget(self.splitter)
-
-        self.left_panel = QScrollArea()
-        self.left_panel.setWidgetResizable(True)
-        self.left_panel.setFrameShape(QFrame.Shape.NoFrame)
-        self.left_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.left_panel.setMinimumWidth(260)
+        self.splitter = self.editor_shell.splitter
+        self.left_panel = self.editor_shell.left_panel
+        # Leave enough room for the vertical scrollbar without forcing the
+        # resizable sidebar content into a hidden horizontal overflow.
+        self.left_panel.setMinimumWidth(280)
         self.left_panel.setMaximumWidth(360)
-        left_content = QWidget()
-        left_layout = QVBoxLayout(left_content)
-        left_layout.setContentsMargins(0, 0, 6, 0)
-        left_layout.setSpacing(6)
 
         folder_box = QFrame()
         folder_layout = QFormLayout(folder_box)
@@ -708,33 +706,29 @@ class StitchGraphEditorDialog(QDialog):
         folder_layout.addRow("图片文件夹", self.edit_src_dir)
         folder_layout.addRow("标签文件夹", self.edit_label_dir)
         folder_layout.addRow("输出文件夹", self.edit_output_dir)
-        self.check_overwrite_source = QPushButton("直接覆盖原标签：关")
+        self.check_overwrite_source = QCheckBox("直接覆盖原标签：关")
+        self.check_overwrite_source.setAccessibleName("直接覆盖原标签")
+        self.check_overwrite_source.setToolTip("保存时直接写回原标签文件；关闭后写入输出文件夹")
         self.check_overwrite_source.setCheckable(True)
         self.check_overwrite_source.toggled.connect(self._on_toggle_overwrite_source)
         folder_layout.addRow("保存方式", self.check_overwrite_source)
-        left_layout.addWidget(folder_box)
+        self.editor_shell.add_sidebar_section(folder_box, "数据与保存")
 
-        row_folder = QHBoxLayout()
-        row_folder.setSpacing(8)
         self.btn_choose_src = QPushButton("图片…")
         self.btn_choose_src.setToolTip("选择图片文件夹")
         self.btn_choose_label = QPushButton("标签…")
         self.btn_choose_label.setToolTip("选择标签文件夹")
         self.btn_choose_out = QPushButton("输出…")
         self.btn_choose_out.setToolTip("选择输出文件夹")
-        row_folder.addWidget(self.btn_choose_src)
-        row_folder.addWidget(self.btn_choose_label)
-        row_folder.addWidget(self.btn_choose_out)
-        left_layout.addLayout(row_folder)
+        self.editor_shell.add_sidebar(ActionBar((self.btn_choose_src, self.btn_choose_label, self.btn_choose_out)))
 
-        row_open = QHBoxLayout()
-        row_open.setSpacing(8)
         self.btn_open_folder = QPushButton("加载")
+        self.btn_open_folder.setAccessibleName("加载标注数据文件夹")
         self.btn_open_folder.setToolTip("加载当前数据文件夹")
         self.btn_reload_current = QPushButton("刷新当前图")
-        row_open.addWidget(self.btn_open_folder)
-        row_open.addWidget(self.btn_reload_current)
-        left_layout.addLayout(row_open)
+        self.btn_reload_current.setAccessibleName("刷新当前图像")
+        self.editor_shell.add_action(self.btn_open_folder)
+        self.editor_shell.add_action(self.btn_reload_current)
 
         nav_box = QFrame()
         nav_layout = QFormLayout(nav_box)
@@ -750,60 +744,56 @@ class StitchGraphEditorDialog(QDialog):
         nav_layout.addRow("连边数", self.lbl_edge_count)
         nav_layout.addRow("选中点", self.lbl_selected)
         nav_layout.addRow("待连起点", self.lbl_pending)
-        left_layout.addWidget(nav_box)
+        self.editor_shell.add_sidebar_section(nav_box, "当前数据")
 
-        row_nav = QHBoxLayout()
-        row_nav.setSpacing(8)
         self.btn_prev = QPushButton("上一张")
         self.btn_next = QPushButton("下一张")
         self.btn_save = QPushButton("保存当前")
-        row_nav.addWidget(self.btn_prev)
-        row_nav.addWidget(self.btn_next)
-        row_nav.addWidget(self.btn_save)
-        left_layout.addLayout(row_nav)
+        self.btn_prev.setAccessibleName("上一张图片")
+        self.btn_next.setAccessibleName("下一张图片")
+        self.btn_save.setAccessibleName("保存当前标注")
+        self.btn_prev.setToolTip("切换到上一张图片（快捷键 A）")
+        self.btn_next.setToolTip("切换到下一张图片（快捷键 D）")
+        self.btn_save.setToolTip("保存当前标注（快捷键 S）")
+        self.editor_shell.add_action(self.btn_prev)
+        self.editor_shell.add_action(self.btn_next)
+        self.editor_shell.add_action(self.btn_save)
 
-        row_edge = QHBoxLayout()
-        row_edge.setSpacing(8)
         self.btn_undo_edge = QPushButton("撤销边")
         self.btn_undo_edge.setToolTip("撤销上一条边")
         self.btn_clear_edges = QPushButton("清空边")
-        row_edge.addWidget(self.btn_undo_edge)
-        row_edge.addWidget(self.btn_clear_edges)
-        left_layout.addLayout(row_edge)
+        self.editor_shell.add_sidebar(ActionBar((self.btn_undo_edge, self.btn_clear_edges)))
 
-        row_mode = QHBoxLayout()
-        row_mode.setSpacing(6)
         self.btn_mode_edge = QPushButton("连边")
         self.btn_mode_add = QPushButton("加点")
         self.btn_mode_move = QPushButton("移点")
         self.btn_mode_delete = QPushButton("删点")
         for btn in (self.btn_mode_edge, self.btn_mode_add, self.btn_mode_move, self.btn_mode_delete):
             btn.setCheckable(True)
-            row_mode.addWidget(btn)
-        left_layout.addLayout(row_mode)
+        self.editor_shell.add_sidebar(ActionBar((self.btn_mode_edge, self.btn_mode_add, self.btn_mode_move, self.btn_mode_delete)))
 
         self.file_list = QListWidget()
         self.file_list.setMinimumHeight(140)
         self.file_list.setMaximumHeight(220)
-        left_layout.addWidget(self.file_list, 1)
+        file_section = self.editor_shell.add_sidebar_section(self.file_list, "文件列表")
+        file_section.setMinimumHeight(180)
 
         self.lbl_help = QLabel(
             "快捷说明\n"
             "左键连边 / Shift 连续串边 / 右键取消或平移 / A D 切图 / S 保存 / H 显隐标签 / +/- 缩放"
         )
         self.lbl_help.setWordWrap(True)
-        self.lbl_help.setStyleSheet("color:#6B7280;font-size:11px;")
-        left_layout.addWidget(self.lbl_help)
+        self.lbl_help.setProperty("uiRole", "muted")
+        self.editor_shell.add_sidebar(self.lbl_help)
 
-        self.status_label = QLabel("请先加载数据文件夹。")
-        left_layout.addWidget(self.status_label)
+        self.status_label = self.editor_shell.status_banner.label
+        self.status_label.setText("请先加载数据文件夹。")
         self.save_status_label = QLabel("未修改")
-        left_layout.addWidget(self.save_status_label)
-        self.left_panel.setWidget(left_content)
+        self.editor_shell.add_sidebar(self.save_status_label)
 
         self.canvas = EdgeAnnotationCanvas()
-        self.splitter.addWidget(self.left_panel)
-        self.splitter.addWidget(self.canvas)
+        self.canvas.setAccessibleName("标注画布")
+        self.editor_shell.set_canvas(self.canvas)
         self.splitter.setSizes([320, 1100])
         self._set_mode("edge")
         self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)

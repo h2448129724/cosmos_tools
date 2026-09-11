@@ -15,9 +15,11 @@ import numpy as np
 import onnxruntime as ort
 
 try:
-    from .utils import _imread, _imwrite, detect_peaks
+    from .utils import _imread, _imwrite
+    from .inference_core import apply_tta, combine_tta_heatmaps, detect_peaks, tta_plan
 except ImportError:
-    from utils import _imread, _imwrite, detect_peaks
+    from utils import _imread, _imwrite
+    from inference_core import apply_tta, combine_tta_heatmaps, detect_peaks, tta_plan
 
 
 class KeypointDetectorONNX:
@@ -37,6 +39,11 @@ class KeypointDetectorONNX:
         self.session = ort.InferenceSession(model_path, providers=providers)
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
+        input_shape = self.session.get_inputs()[0].shape
+        if len(input_shape) >= 4 and all(isinstance(value, int) for value in input_shape[2:4]):
+            self._model_shape = (int(input_shape[2]), int(input_shape[3]))
+        else:
+            self._model_shape = None
 
         provider_name = self.session.get_providers()[0]
         print(f"[INFO] ONNX provider: {provider_name}")
@@ -67,15 +74,15 @@ class KeypointDetectorONNX:
     def _inference_tta(self, img_np):
         """TTA: original + 4 翻转 + 3 旋转，共 7 路。"""
         h, w = img_np.shape[:2]
-        heatmaps = [self._inference(img_np).squeeze()]
-        heatmaps.append(self._inference(img_np[:, ::-1, :].copy()).squeeze()[:, ::-1])
-        heatmaps.append(self._inference(img_np[::-1, :, :].copy()).squeeze()[::-1, :])
-        heatmaps.append(self._inference(img_np[::-1, ::-1, :].copy()).squeeze()[::-1, ::-1])
-        for k in [1, 2, 3]:
-            rot = cv2.resize(np.rot90(img_np, k).copy(), (w, h))
-            hm = self._inference(rot).squeeze()
-            heatmaps.append(np.rot90(cv2.resize(hm, (w, h)), 4 - k))
-        return np.mean(heatmaps, axis=0)[np.newaxis]
+        heatmaps = []
+        plan = tta_plan(h, w, model_shape=self._model_shape)
+        for path in plan:
+            transformed = apply_tta(img_np, path).copy()
+            if path.model_shape != path.native_shape:
+                transformed = cv2.resize(transformed, (path.model_shape[1], path.model_shape[0]))
+            hm = self._inference(transformed).squeeze()
+            heatmaps.append(hm)
+        return combine_tta_heatmaps(heatmaps, (h, w), plan=plan, resize_fn=cv2.resize)
 
     # ── 检测接口 ──
 

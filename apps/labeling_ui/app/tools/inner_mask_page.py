@@ -7,9 +7,6 @@ import cv2
 import numpy as np
 from PySide6.QtWidgets import (
     QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -17,7 +14,8 @@ from PySide6.QtWidgets import (
 
 from apps.data_tools.processing.image_io import read_image
 from ..preview_widget import ZoomableLabel, cv2_to_qpixmap
-from .base import BaseToolPage, make_card, make_page_header, set_primary
+from cosmos_toolbox.ui import ActionBar, PageScaffold, PathField, SectionSurface, StatusBanner
+from .base import BaseToolPage, set_primary
 
 
 def _write_image(path: Path, image: np.ndarray) -> None:
@@ -43,73 +41,61 @@ class InnerMaskPage(BaseToolPage):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(8)
+        scaffold = PageScaffold("内侧 Mask 制作", "绘制内侧多边形并保存为白色内侧、黑色背景的 mask。")
+        QVBoxLayout(self).addWidget(scaffold)
+        root = scaffold.content_layout
 
-        root.addWidget(make_page_header("内侧 Mask 制作", "绘制内侧多边形并保存为白色内侧、黑色背景的 mask。"))
+        controls = SectionSurface("输入与输出", "选择图片并设置 mask 保存路径。")
+        controls_lay = controls.body_layout
 
-        controls = make_card()
-        controls_lay = QVBoxLayout(controls)
-        controls_lay.setContentsMargins(14, 14, 14, 14)
-        controls_lay.setSpacing(10)
-
-        image_row = QHBoxLayout()
-        image_row.addWidget(QLabel("图片"))
-        self._image_entry = QLineEdit("")
-        image_row.addWidget(self._image_entry, 1)
-        btn_pick_image = QPushButton("选择图片")
-        btn_pick_image.clicked.connect(self._pick_image)
-        image_row.addWidget(btn_pick_image)
+        image_field = PathField("图片", placeholder="选择图片文件", browse_text="选择图片")
+        image_field.browse_requested.connect(self._pick_image)
+        self._image_entry = image_field.line_edit
+        controls_lay.addWidget(image_field)
         btn_load = QPushButton("加载")
+        btn_load.setAccessibleName("加载图片")
         set_primary(btn_load)
         btn_load.clicked.connect(self._load_image)
-        image_row.addWidget(btn_load)
-        controls_lay.addLayout(image_row)
+        controls_lay.addWidget(btn_load)
 
-        output_row = QHBoxLayout()
-        output_row.addWidget(QLabel("输出"))
-        self._output_entry = QLineEdit("")
-        output_row.addWidget(self._output_entry, 1)
-        btn_pick_output = QPushButton("保存到")
-        btn_pick_output.clicked.connect(self._pick_output)
-        output_row.addWidget(btn_pick_output)
-        controls_lay.addLayout(output_row)
+        output_field = PathField("输出", placeholder="选择 mask 输出路径", browse_text="保存到")
+        output_field.browse_requested.connect(self._pick_output)
+        self._output_entry = output_field.line_edit
+        controls_lay.addWidget(output_field)
 
-        button_row = QHBoxLayout()
+        button_row = ActionBar()
         btn_draw = QPushButton("开始绘制内侧")
+        btn_draw.setAccessibleName("开始绘制内侧区域")
         set_primary(btn_draw)
         btn_draw.clicked.connect(self._start_draw)
-        button_row.addWidget(btn_draw)
+        button_row.add_widget(btn_draw)
         btn_undo = QPushButton("撤销上一个")
+        btn_undo.setAccessibleName("撤销上一个内侧区域")
         btn_undo.clicked.connect(self._undo_polygon)
-        button_row.addWidget(btn_undo)
+        button_row.add_widget(btn_undo)
         btn_clear = QPushButton("清空")
+        btn_clear.setAccessibleName("清空内侧区域")
         btn_clear.clicked.connect(self._clear_polygons)
-        button_row.addWidget(btn_clear)
+        button_row.add_widget(btn_clear)
         btn_save = QPushButton("保存 Mask")
+        btn_save.setAccessibleName("保存内侧 Mask")
         set_primary(btn_save)
         btn_save.clicked.connect(self._save_mask)
-        button_row.addWidget(btn_save)
-        button_row.addStretch(1)
-        controls_lay.addLayout(button_row)
+        button_row.add_widget(btn_save)
+        controls_lay.addWidget(button_row)
 
-        self._status = QLabel("请选择图片。")
-        self._status.setStyleSheet("color:#64748b;")
-        controls_lay.addWidget(self._status)
+        self._status_banner = StatusBanner("请选择图片。")
+        self._status = self._status_banner.label
+        controls_lay.addWidget(self._status_banner)
         root.addWidget(controls)
 
-        preview_card = make_card()
-        preview_lay = QVBoxLayout(preview_card)
-        preview_lay.setContentsMargins(12, 12, 12, 12)
-        preview_lay.setSpacing(8)
+        preview_card = SectionSurface("预览与绘制", "左键逐点绘制，双击或点击起点闭合；可连续绘制多个内侧区域。")
+        preview_lay = preview_card.body_layout
         self._preview = ZoomableLabel()
-        self._preview.setMinimumHeight(420)
+        self._preview.setMinimumHeight(280)
+        self._preview.setAccessibleName("内侧区域绘制画布")
         self._preview.polygonClosed.connect(self._on_polygon_closed)
         preview_lay.addWidget(self._preview, 1)
-        hint = QLabel("左键逐点绘制，双击或点击起点闭合；可连续绘制多个内侧区域。")
-        hint.setStyleSheet("color:#64748b;")
-        preview_lay.addWidget(hint)
         root.addWidget(preview_card, 1)
 
     def _pick_image(self) -> None:

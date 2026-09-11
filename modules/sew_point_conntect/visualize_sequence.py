@@ -13,6 +13,7 @@ from .batch_predict import (
 )
 from .datasets import collect_json_files, load_annotation
 from .infer import POSTPROCESS_PRESETS, resolve_postprocess_params
+from .runtime import TorchConnectorRuntime
 
 
 def visualize_sequence(
@@ -48,6 +49,7 @@ def visualize_sequence(
         "skipped_empty_points": 0,
         "errors": 0,
     }
+    runtime: TorchConnectorRuntime | None = None
 
     total = len(json_files)
     for index, json_file in enumerate(json_files, start=1):
@@ -64,6 +66,9 @@ def visualize_sequence(
             if not image_path or not Path(image_path).exists():
                 raise FileNotFoundError(f"未找到对应图片: {json_path.name}")
 
+            if runtime is None:
+                runtime = TorchConnectorRuntime(model_path)
+
             predicted_edges = predict_edges_from_annotation(
                 annotation=annotation,
                 json_path=str(json_path),
@@ -74,6 +79,7 @@ def visualize_sequence(
                 max_small_cycle_length=postprocess_params["max_small_cycle_length"],
                 continuity_weight=postprocess_params["continuity_weight"],
                 cycle_penalty=postprocess_params["cycle_penalty"],
+                runtime=runtime,
             )
             image = _imread(image_path)
             vis = draw_visualization(image, annotation, predicted_edges, compare_with_gt=compare_with_gt)

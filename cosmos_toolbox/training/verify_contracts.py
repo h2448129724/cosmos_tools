@@ -8,17 +8,23 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
+from cosmos_toolbox.paths import ensure_import_paths
 from cosmos_toolbox.training.model_registry import create_model
-from sew_point.export_onnx import export_onnx as export_sew_point
-from train.models.sew_point_connector import EdgeGraphCore, EdgePatchEncoder
-from train.tools.export_microunet_onnx import compare_outputs, export_onnx as export_microunet
-from train.tools.export_sew_point_connector_onnx import (
-    build_model as build_connector,
-    compare_split_graph,
-    export_graph_core,
-    export_patch_encoder,
-    make_probe_graph,
-)
+from cosmos_toolbox.training.cab_f_project import project_entry
+
+ensure_import_paths()
+
+from sew_point.export_onnx import export_onnx as export_sew_point  # noqa: E402
+from train.tools.export_microunet_onnx import compare_outputs, export_onnx as export_microunet  # noqa: E402
+
+_cab_f = project_entry()
+EdgeGraphCore = _cab_f.EdgeGraphCore
+EdgePatchEncoder = _cab_f.EdgePatchEncoder
+build_connector = _cab_f.build_model
+compare_split_graph = _cab_f.compare_split_graph
+export_graph_core = _cab_f.export_graph_core
+export_patch_encoder = _cab_f.export_patch_encoder
+make_probe_graph = _cab_f.make_probe_graph
 
 
 def verify_contracts() -> dict:

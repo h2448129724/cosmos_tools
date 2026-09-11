@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QWidget
 
 from .canvas import AnnotationCanvas
+from cosmos_toolbox.ui.primitives import set_ui_role
 
 
 class LayerVisibilityPanel(QWidget):
@@ -16,7 +17,8 @@ class LayerVisibilityPanel(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(8)
         label = QLabel("显示")
-        label.setStyleSheet("color:#64748b;font-size:12px;font-weight:600;")
+        set_ui_role(label, "fieldLabel")
+        label.setAccessibleName("图层可见性")
         self._layout.addWidget(label)
         self._layout.addStretch(1)
 
@@ -38,7 +40,8 @@ class LayerVisibilityPanel(QWidget):
         for layer in self._canvas.document.layers:
             checkbox = QCheckBox(layer.title or layer.key)
             checkbox.setChecked(layer.visible)
-            checkbox.setToolTip(layer.source_field)
+            checkbox.setAccessibleName(f"显示图层：{layer.title or layer.key}")
+            checkbox.setToolTip(layer.source_field or f"切换图层 {layer.title or layer.key} 的可见性")
             checkbox.toggled.connect(lambda checked, key=layer.key: self._on_layer_toggled(key, checked))
             self._checkboxes[layer.key] = checkbox
             self._layout.addWidget(checkbox)

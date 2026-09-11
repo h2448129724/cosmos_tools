@@ -14,8 +14,10 @@ import torch
 
 try:
     from .model_registry import DEFAULT_MODEL, get_model, model_choices
+    from .inference_core import decode_checkpoint
 except ImportError:
     from model_registry import DEFAULT_MODEL, get_model, model_choices
+    from inference_core import decode_checkpoint
 
 
 def _configure_stdio() -> None:
@@ -34,11 +36,9 @@ def export_onnx(model_path, output_path, input_size=256, opset_version=18, embed
     """Export PyTorch model to ONNX."""
     device = torch.device("cpu")
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-    if isinstance(checkpoint, dict) and "model_state" in checkpoint:
-        model_name = str(checkpoint.get("model_key") or model_name)
-        state = checkpoint["model_state"]
-    else:
-        state = checkpoint
+    decoded = decode_checkpoint(checkpoint, model_name)
+    model_name = decoded.model_name or model_name
+    state = decoded.state
     model = get_model(model_name, in_ch=3, out_ch=1)
     model.load_state_dict(state, strict=True)
     model.eval()

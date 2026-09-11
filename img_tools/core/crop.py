@@ -6,7 +6,8 @@ from typing import Callable, Literal
 
 import numpy as np
 
-from .geometry import clamp_roi, scale_roi
+from .crop_plan import CropRegion, build_image_crop_plan
+from .geometry import clamp_roi
 from .image_io import iter_image_files, read_image, write_image
 from .models import BatchCropResult, Roi
 from .output import ConflictPolicy, resolve_output_path
@@ -58,18 +59,38 @@ def batch_crop(
         else:
             image_h, image_w = image.shape[:2]
             relative_parent = source.relative_to(source_root).parent if preserve_structure else Path()
-            for roi_index, roi in enumerate(rois, start=1):
-                mapped = scale_roi(roi, reference_size, (image_w, image_h)) if coordinate_mode == "scaled" else roi
+            plan = build_image_crop_plan(
+                source_name=source.name,
+                image_size=(image_w, image_h),
+                regions=(
+                    CropRegion(roi.x, roi.y, roi.x2, roi.y2, roi.name)
+                    for roi in rois
+                ),
+                reference_size=reference_size,
+                coordinate_mode="scaled" if coordinate_mode == "scaled" else "absolute",
+                scale_semantics="origin_size",
+                suffix_mode="lower",
+            )
+            operations = {operation.region_index: operation for operation in plan.operations}
+            rejections = {rejection.region_index: rejection for rejection in plan.rejections}
+            for roi_index in range(1, len(rois) + 1):
+                rejection = rejections.get(roi_index)
+                if rejection is not None:
+                    errors.append(f"{source.name} / {rejection.region_name}: {rejection.reason}")
+                    continue
+                operation = operations[roi_index]
                 try:
-                    cropped, _ = crop_image(image, mapped)
-                    suffix = source.suffix.lower()
-                    output_name = f"{source.stem}_roi_{roi_index}{suffix}"
-                    output_path = resolve_output_path(destination_root / relative_parent / output_name, conflict_policy)
+                    x1, y1, x2, y2 = operation.box
+                    cropped = image[y1:y2, x1:x2].copy()
+                    output_path = resolve_output_path(
+                        destination_root / relative_parent / operation.output_name,
+                        conflict_policy,
+                    )
                     if output_path is not None:
                         write_image(output_path, cropped)
                         written += 1
                 except (ValueError, OSError) as error:
-                    errors.append(f"{source.name} / {roi.name}: {error}")
+                    errors.append(f"{source.name} / {operation.region_name}: {error}")
         if progress is not None:
             progress(index, len(files))
     return BatchCropResult(processed, written, tuple(errors), cancelled)

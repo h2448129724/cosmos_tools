@@ -10,14 +10,25 @@ from pathlib import Path
 
 from shared.project_paths import repo_root
 
+from .annotation_source import resolve_edge_annotation_dir
 from .config_model import load_config
+from .plan import (
+    CabfStepPlan,
+    build_export_model_a_plan,
+    build_export_model_b_plan,
+    build_predict_edges_plan,
+    build_predict_points_plan,
+    build_post_point_workflow_plan,
+    build_train_model_a_plan,
+    build_train_model_b_plan,
+    build_validate_plan,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config" / "default_paths.json"
 LOG_DIR = SCRIPT_DIR / "logs"
 REPO_ROOT = repo_root()
-SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 
 def quote_args(args: list[str]) -> str:
@@ -47,84 +58,30 @@ def run_command(args: list[str], cwd: str, dry_run: bool) -> int:
     return int(completed.returncode)
 
 
+def _run_plan(step: CabfStepPlan, dry_run: bool) -> int:
+    return run_command(list(step.argv), cwd=step.cwd, dry_run=dry_run)
+
+
 def ensure_value(value: str, field_name: str) -> None:
     if not str(value).strip():
         raise ValueError(f"配置缺失: {field_name}")
 
 
-def _count_labelme_points(data: dict) -> int:
-    shapes = data.get("shapes", []) if isinstance(data, dict) else []
-    count = 0
-    for shape in shapes:
-        if not isinstance(shape, dict):
-            continue
-        if shape.get("shape_type") != "point":
-            continue
-        if str(shape.get("label", "")).strip() != "sew":
-            continue
-        raw_points = shape.get("points", [])
-        if raw_points and len(raw_points[0]) >= 2:
-            count += 1
-    return count
-
-
-def _has_usable_point_json(path_text: str) -> bool:
-    path = Path(path_text)
-    if not path.is_dir():
-        return False
-    for json_path in path.glob("*.json"):
-        try:
-            data = json.loads(json_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            continue
-        if isinstance(data, dict):
-            if len(data.get("points", []) or []) >= 2:
-                return True
-            if _count_labelme_points(data) >= 2:
-                return True
-    return False
-
-
-def _resolve_edge_annotation_dir(cfg: dict, requested: str) -> tuple[str, str | None]:
-    if requested and _has_usable_point_json(requested):
-        return requested, None
-    if requested and Path(requested).is_dir():
-        fallback = str(cfg.get("point_predictions_dir", "") or "")
-        if fallback and fallback != requested and _has_usable_point_json(fallback):
-            return fallback, f"annotation_dir fallback: {requested} -> {fallback}"
-        return requested, None
-
-    master_dir = str(cfg.get("master_annotations_dir", "") or "")
-    if _has_usable_point_json(master_dir):
-        return master_dir, None
-
-    fallback = str(cfg.get("point_predictions_dir", "") or "")
-    if _has_usable_point_json(fallback):
-        return fallback, f"annotation_dir fallback: {master_dir or requested} -> {fallback}"
-    return requested or master_dir or fallback, None
+_resolve_edge_annotation_dir = resolve_edge_annotation_dir
 
 
 def cmd_predict_points(cfg: dict, args: argparse.Namespace) -> int:
     model = args.model or cfg["weights"]["sew_point_onnx"]
-    cmd = [
-        sys.executable,
-        "-m",
-        "sew_point.tools.batch_infer",
-        "--input_dir",
-        args.image_dir or cfg["master_images_dir"],
-        "--output_dir",
-        args.output_dir or cfg["point_predictions_dir"],
-        "--threshold",
-        str(args.threshold),
-        "--output_format",
-        "master",
-    ]
-    distance_threshold = float(args.distance_threshold)
-    if distance_threshold > 0:
-        cmd.extend(["--cluster_dist", str(distance_threshold)])
-    if str(model).strip():
-        cmd.extend(["--model", model])
-    return run_command(cmd, cwd=cfg["train_model_modules_root"], dry_run=args.dry_run)
+    step = build_predict_points_plan(
+        python_executable=sys.executable,
+        modules_root=cfg["train_model_modules_root"],
+        images_dir=args.image_dir or cfg["master_images_dir"],
+        output_dir=args.output_dir or cfg["point_predictions_dir"],
+        threshold=args.threshold,
+        distance_threshold=args.distance_threshold,
+        model=model,
+    )
+    return _run_plan(step, args.dry_run)
 
 
 def cmd_predict_edges(cfg: dict, args: argparse.Namespace) -> int:
@@ -132,44 +89,33 @@ def cmd_predict_edges(cfg: dict, args: argparse.Namespace) -> int:
     if not args.dry_run:
         ensure_value(model, "weights.sew_point_connector_pth")
     annotation_dir, note = _resolve_edge_annotation_dir(cfg, args.annotation_dir or cfg["master_annotations_dir"])
-    cmd = [
-        sys.executable,
-        "-m",
-        "sew_point_conntect.batch_predict",
-        "--image_dir",
-        args.image_dir or cfg["master_images_dir"],
-        "--annotation_dir",
-        annotation_dir,
-        "--output_annotation_dir",
-        args.output_dir or cfg["edge_predictions_dir"],
-        "--postprocess_preset",
-        args.postprocess_preset,
-    ]
-    if str(model).strip():
-        cmd.extend(["--model_path", model])
-    if args.no_compare_gt:
-        cmd.append("--no_compare_gt")
+    step = build_predict_edges_plan(
+        python_executable=sys.executable,
+        modules_root=cfg["train_model_modules_root"],
+        images_dir=args.image_dir or cfg["master_images_dir"],
+        annotation_dir=annotation_dir,
+        output_dir=args.output_dir or cfg["edge_predictions_dir"],
+        model=model,
+        postprocess_preset=args.postprocess_preset,
+        no_compare_gt=args.no_compare_gt,
+    )
     if note:
         timestamp = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
         print(f"[{timestamp}] [info] {note}")
         append_log(f"[{timestamp}] [info] {note}")
-    return run_command(cmd, cwd=cfg["train_model_modules_root"], dry_run=args.dry_run)
+    return _run_plan(step, args.dry_run)
 
 
 def cmd_validate(cfg: dict, args: argparse.Namespace) -> int:
-    cmd = [
-        sys.executable,
-        str(SCRIPTS_DIR / "cabf_validate.py"),
-        "--image_dir",
-        args.image_dir or cfg["master_images_dir"],
-        "--annotation_dir",
-        args.annotation_dir or cfg["master_annotations_dir"],
-    ]
-    if args.report_path:
-        cmd.extend(["--report_json", args.report_path])
-    if args.show_samples:
-        cmd.append("--details")
-    return run_command(cmd, cwd=str(REPO_ROOT), dry_run=args.dry_run)
+    step = build_validate_plan(
+        python_executable=sys.executable,
+        repo_root=str(REPO_ROOT),
+        images_dir=args.image_dir or cfg["master_images_dir"],
+        annotation_dir=args.annotation_dir or cfg["master_annotations_dir"],
+        report_path=args.report_path,
+        show_samples=args.show_samples,
+    )
+    return _run_plan(step, args.dry_run)
 
 
 def cmd_export(cfg: dict, args: argparse.Namespace) -> int:
@@ -177,62 +123,40 @@ def cmd_export(cfg: dict, args: argparse.Namespace) -> int:
     annotation_dir = args.annotation_dir or cfg["master_annotations_dir"]
     model_a_output = args.model_a_output or cfg["model_a_export_root"]
     model_b_output = args.model_b_output or cfg["model_b_export_root"]
-    commands = [
-        [
-            sys.executable,
-            str(SCRIPTS_DIR / "cabf_export_model_a.py"),
-            "--image_dir",
-            image_dir,
-            "--annotation_dir",
-            annotation_dir,
-            "--output_dir",
-            model_a_output,
-        ],
-        [
-            sys.executable,
-            str(SCRIPTS_DIR / "cabf_export_model_b.py"),
-            "--image_dir",
-            image_dir,
-            "--annotation_dir",
-            annotation_dir,
-            "--output_dir",
-            model_b_output,
-        ],
+    steps = [
+        build_export_model_a_plan(
+            python_executable=sys.executable, repo_root=str(REPO_ROOT), images_dir=image_dir,
+            annotation_dir=annotation_dir, output_dir=model_a_output,
+        ),
+        build_export_model_b_plan(
+            python_executable=sys.executable, repo_root=str(REPO_ROOT), images_dir=image_dir,
+            annotation_dir=annotation_dir, output_dir=model_b_output,
+        ),
     ]
-    for command in commands:
-        code = run_command(command, cwd=str(REPO_ROOT), dry_run=args.dry_run)
+    for step in steps:
+        code = _run_plan(step, args.dry_run)
         if code != 0:
             return code
     return 0
 
 
 def cmd_train(cfg: dict, args: argparse.Namespace) -> int:
-    commands = [
-        [
-            sys.executable,
-            "-m",
-            "sew_point.train",
-            "--img_dir",
-            args.model_a_images or str(Path(cfg["model_a_export_root"]) / "images"),
-            "--ann_dir",
-            args.model_a_annotations or str(Path(cfg["model_a_export_root"]) / "annotations"),
-            "--save_dir",
-            args.model_a_out or cfg["outputs"]["sew_point_train_out"],
-        ],
-        [
-            sys.executable,
-            "-m",
-            "sew_point_conntect.train",
-            "--image_dir",
-            args.model_b_images or str(Path(cfg["model_b_export_root"]) / "images"),
-            "--annotation_dir",
-            args.model_b_annotations or str(Path(cfg["model_b_export_root"]) / "annotations"),
-            "--save_dir",
-            args.model_b_out or cfg["outputs"]["sew_point_conntect_train_out"],
-        ],
+    steps = [
+        build_train_model_a_plan(
+            python_executable=sys.executable, modules_root=cfg["train_model_modules_root"],
+            images_dir=args.model_a_images or str(Path(cfg["model_a_export_root"]) / "images"),
+            annotation_dir=args.model_a_annotations or str(Path(cfg["model_a_export_root"]) / "annotations"),
+            output_dir=args.model_a_out or cfg["outputs"]["sew_point_train_out"],
+        ),
+        build_train_model_b_plan(
+            python_executable=sys.executable, modules_root=cfg["train_model_modules_root"],
+            images_dir=args.model_b_images or str(Path(cfg["model_b_export_root"]) / "images"),
+            annotation_dir=args.model_b_annotations or str(Path(cfg["model_b_export_root"]) / "annotations"),
+            output_dir=args.model_b_out or cfg["outputs"]["sew_point_conntect_train_out"],
+        ),
     ]
-    for command in commands:
-        code = run_command(command, cwd=cfg["train_model_modules_root"], dry_run=args.dry_run)
+    for step in steps:
+        code = _run_plan(step, args.dry_run)
         if code != 0:
             return code
     return 0
@@ -278,80 +202,56 @@ def cmd_pipeline(cfg: dict, args: argparse.Namespace) -> int:
         ensure_value(cfg["weights"]["sew_point_connector_pth"], "weights.sew_point_connector_pth")
 
     point_output_dir = args.point_output_dir or cfg["point_predictions_dir"]
-    edge_annotation_dir = args.edge_annotation_dir or point_output_dir
     edge_output_dir = args.edge_output_dir or cfg["edge_predictions_dir"]
     validate_annotation_dir = args.validate_annotation_dir or edge_output_dir
     export_annotation_dir = args.export_annotation_dir or edge_output_dir
+    point_step = build_predict_points_plan(
+        python_executable=sys.executable,
+        modules_root=cfg["train_model_modules_root"],
+        images_dir=args.image_dir or cfg["master_images_dir"],
+        model=args.point_model or cfg["weights"]["sew_point_onnx"],
+        output_dir=point_output_dir,
+        threshold=args.point_threshold,
+        distance_threshold=args.point_distance_threshold,
+    )
+    print(f"\n=== {point_step.kind.value} ===")
+    code = _run_plan(point_step, args.dry_run)
+    if code != 0:
+        return code
 
-    steps = [
-        (
-            "predict-points",
-            cmd_predict_points,
-            argparse.Namespace(
-                image_dir=args.image_dir,
-                output_dir=point_output_dir,
-                model=args.point_model or cfg["weights"]["sew_point_onnx"],
-                threshold=args.point_threshold,
-                distance_threshold=args.point_distance_threshold,
-                dry_run=args.dry_run,
-            ),
-        ),
-        (
-            "predict-edges",
-            cmd_predict_edges,
-            argparse.Namespace(
-                image_dir=args.image_dir,
-                annotation_dir=edge_annotation_dir,
-                output_dir=edge_output_dir,
-                model=args.edge_model or cfg["weights"]["sew_point_connector_pth"],
-                postprocess_preset=args.postprocess_preset,
-                no_compare_gt=args.no_compare_gt,
-                dry_run=args.dry_run,
-            ),
-        ),
-        (
-            "validate",
-            cmd_validate,
-            argparse.Namespace(
-                image_dir=args.image_dir,
-                annotation_dir=validate_annotation_dir,
-                report_path=args.report_path,
-                show_samples=args.show_samples,
-                dry_run=args.dry_run,
-            ),
-        ),
-        (
-            "export",
-            cmd_export,
-            argparse.Namespace(
-                image_dir=args.image_dir,
-                annotation_dir=export_annotation_dir,
-                model_a_output=args.model_a_output,
-                model_b_output=args.model_b_output,
-                dry_run=args.dry_run,
-            ),
-        ),
-    ]
-    if args.include_train:
-        steps.append(
-            (
-                "train",
-                cmd_train,
-                argparse.Namespace(
-                    model_a_images=args.model_a_images,
-                    model_a_annotations=args.model_a_annotations,
-                    model_a_out=args.model_a_out,
-                    model_b_images=args.model_b_images,
-                    model_b_annotations=args.model_b_annotations,
-                    model_b_out=args.model_b_out,
-                    dry_run=args.dry_run,
-                ),
-            )
-        )
-
-    for step_name, func, step_args in steps:
-        print(f"\n=== {step_name} ===")
-        code = func(cfg, step_args)
+    requested_edge_annotation_dir = args.edge_annotation_dir or point_output_dir
+    edge_annotation_dir, note = _resolve_edge_annotation_dir(cfg, requested_edge_annotation_dir)
+    if note:
+        timestamp = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
+        print(f"[{timestamp}] [info] {note}")
+        append_log(f"[{timestamp}] [info] {note}")
+    tail = build_post_point_workflow_plan(
+        python_executable=sys.executable,
+        repo_root=str(REPO_ROOT),
+        modules_root=cfg["train_model_modules_root"],
+        images_dir=args.image_dir or cfg["master_images_dir"],
+        point_annotation_dir=edge_annotation_dir,
+        edge_output_dir=edge_output_dir,
+        edge_model=args.edge_model or cfg["weights"]["sew_point_connector_pth"],
+        postprocess_preset=args.postprocess_preset,
+        no_compare_gt=args.no_compare_gt,
+        validate_annotation_dir=validate_annotation_dir,
+        export_annotation_dir=export_annotation_dir,
+        report_path=args.report_path,
+        show_samples=args.show_samples,
+        model_a_output=args.model_a_output or cfg["model_a_export_root"],
+        model_b_output=args.model_b_output or cfg["model_b_export_root"],
+        include_train=args.include_train,
+        model_a_images=args.model_a_images or str(Path(cfg["model_a_export_root"]) / "images"),
+        model_a_annotations=args.model_a_annotations or str(Path(cfg["model_a_export_root"]) / "annotations"),
+        model_a_out=args.model_a_out or cfg["outputs"]["sew_point_train_out"],
+        model_b_images=args.model_b_images or str(Path(cfg["model_b_export_root"]) / "images"),
+        model_b_annotations=args.model_b_annotations or str(Path(cfg["model_b_export_root"]) / "annotations"),
+        model_b_out=args.model_b_out or cfg["outputs"]["sew_point_conntect_train_out"],
+    )
+    for step in tail:
+        print(f"\n=== {step.kind.value} ===")
+        code = _run_plan(step, args.dry_run)
         if code != 0:
             return code
     return 0

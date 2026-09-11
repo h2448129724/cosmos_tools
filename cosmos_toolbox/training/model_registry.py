@@ -1,35 +1,23 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from cosmos_toolbox.paths import ensure_import_paths
-
-
-@dataclass(frozen=True)
-class ModelSpec:
-    key: str
-    task: str
-    source: str
-    factory: str
-    modes: frozenset[str]
-    priority: int
-    checkpoint_formats: tuple[str, ...] = ()
-    production_consumer: str | None = None
-    description: str = ""
-
-    @property
-    def trainable(self) -> bool:
-        return "train" in self.modes
+from cosmos_toolbox.training.model_resolution import (
+    ModelSpec,
+    list_model_specs,
+    plan_model_construction,
+    resolve_model_spec,
+)
 
 
 _SPECS = (
     ModelSpec(
         key="cabf.sew_point.runtime",
         task="sew_point",
-        source="algo_cab_f",
-        factory="algo.cab_f.sew_point_detector:SewPointDetector",
+        source="cab_f_project",
+        factory="cosmos_toolbox.training.cab_f_project:create_sew_point_detector",
         modes=frozenset({"infer"}),
         priority=300,
         checkpoint_formats=(".onnx",),
@@ -38,8 +26,8 @@ _SPECS = (
     ModelSpec(
         key="cabf.sew_point_connector.runtime",
         task="sew_point_connect",
-        source="algo_cab_f",
-        factory="algo.cab_f.sew_point_connector:SewPointConnector",
+        source="cab_f_project",
+        factory="cosmos_toolbox.training.cab_f_project:create_sew_point_connector",
         modes=frozenset({"infer"}),
         priority=300,
         checkpoint_formats=(".onnx",),
@@ -68,12 +56,12 @@ _SPECS = (
     ModelSpec(
         key="edge_graph_net",
         task="sew_point_connect",
-        source="cosmos_train",
-        factory="train.models.sew_point_connector:EdgeGraphNet",
+        source="cab_f_project",
+        factory="cosmos_toolbox.training.cab_f_project:create_edge_graph_net",
         modes=frozenset({"train", "infer", "export"}),
         priority=200,
         checkpoint_formats=(".pth", ".pt", ".ckpt"),
-        production_consumer="algo.cab_f.sew_point_connector:SewPointConnector",
+        production_consumer="cosmos_toolbox.training.cab_f_project:create_sew_point_connector",
     ),
     ModelSpec(
         key="microunet",
@@ -110,7 +98,7 @@ _SPECS = (
         modes=frozenset({"train", "infer", "export"}),
         priority=100,
         checkpoint_formats=(".pth", ".pt", ".ckpt"),
-        production_consumer="algo.cab_f.sew_point_detector:SewPointDetector",
+        production_consumer="cosmos_toolbox.training.cab_f_project:create_sew_point_detector",
     ),
     ModelSpec(
         key="ultralytics_yolo",
@@ -142,31 +130,25 @@ def _is_available(spec: ModelSpec) -> bool:
 
 
 def list_models(*, task: str | None = None, mode: str | None = None, available_only: bool = True) -> list[ModelSpec]:
-    specs: Iterable[ModelSpec] = _SPECS
-    if task is not None:
-        specs = (spec for spec in specs if spec.task == task)
-    if mode is not None:
-        specs = (spec for spec in specs if mode in spec.modes)
-    result = list(specs)
+    available = None
     if available_only:
-        result = [spec for spec in result if _is_available(spec)]
-    return sorted(result, key=lambda spec: (-spec.priority, spec.key, spec.source))
+        available = {spec.factory for spec in _SPECS if _is_available(spec)}
+    return list(list_model_specs(_SPECS, task=task, mode=mode, available_factory_refs=available))
 
 
 def resolve_model(task: str, mode: str, key: str | None = None) -> ModelSpec:
-    candidates = list_models(task=task, mode=mode, available_only=True)
-    if key is not None:
-        candidates = [spec for spec in candidates if spec.key == key]
-    if not candidates:
-        label = f" key={key!r}" if key else ""
-        raise LookupError(f"No available model for task={task!r}, mode={mode!r}{label}")
-    return candidates[0]
+    available = {spec.factory for spec in _SPECS if _is_available(spec)}
+    return resolve_model_spec(
+        _SPECS,
+        task=task,
+        mode=mode,
+        key=key,
+        available_factory_refs=available,
+    )
 
 
 def create_model(task: str, mode: str = "train", key: str | None = None, **kwargs: Any) -> Any:
     spec = resolve_model(task, mode, key)
+    plan = plan_model_construction(spec, kwargs)
     factory = _load_symbol(spec.factory)
-    if spec.key == "microunet_gn":
-        kwargs.setdefault("norm", "gn")
-        kwargs.setdefault("dropout", 0.0)
-    return factory(**kwargs)
+    return factory(**plan.keyword_arguments())

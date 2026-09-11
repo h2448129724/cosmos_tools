@@ -10,6 +10,14 @@ from PySide6.QtCore import QObject, Signal
 
 from .history_manager import HistoryManager
 from .models import CondaEnvInfo, FeatureAction, FeatureModule, RunRecord
+from .run_plan import (
+    build_export_argv,
+    build_runtime_plan,
+    build_yolo_argv,
+    module_pythonpath_entries as planned_pythonpath_entries,
+    plan_output_target,
+    resolve_yolo_model_name,
+)
 
 WINDOWS_NO_WINDOW_FLAGS = 0
 WINDOWS_STARTUPINFO = None
@@ -167,15 +175,19 @@ class RunManager(QObject):
         conda_env: CondaEnvInfo | None = None,
         target_platform: str = "linux",
     ) -> str:
-        if feature.feature_name == "yolo" and action.action_name in ("train", "predict", "export_onnx"):
-            return self._build_yolo_export_command_text(action, params, conda_env, target_platform)
-
-        command = self._build_export_command_args(feature, action, params)
+        uses_yolo_cli = feature.feature_name == "yolo" and action.action_name in {
+            "train",
+            "predict",
+            "export_onnx",
+        }
+        command = list(build_export_argv(feature, action, params))
         lines: list[str] = []
         self._append_activate_line(lines, conda_env, target_platform)
         command_text = self._format_command(command, target_platform)
 
-        if action.entry.type == "module":
+        if uses_yolo_cli:
+            lines.append(command_text)
+        elif action.entry.type == "module":
             pythonpath = self._format_pythonpath_for_export(target_platform)
             if target_platform == "windows":
                 lines.append(f"$env:PYTHONPATH = '{pythonpath}'")
@@ -200,105 +212,8 @@ class RunManager(QObject):
     ) -> str:
         lines: list[str] = []
         self._append_activate_line(lines, conda_env, target_platform)
-
-        if action.action_name == "train":
-            task = str(params.get("task") or "detect")
-            model_name = self._resolve_yolo_model_name(params)
-            command = [
-                "yolo",
-                task,
-                "train",
-                f"data={params.get('data')}",
-                f"model={model_name}",
-            ]
-            for name in ["epochs", "imgsz", "batch", "workers", "patience", "seed"]:
-                value = params.get(name)
-                if value not in (None, ""):
-                    command.append(f"{name}={value}")
-
-            if params.get("device") not in (None, ""):
-                command.append(f"device={params.get('device')}")
-            if params.get("cache"):
-                command.append("cache=True")
-            if params.get("amp"):
-                command.append("amp=True")
-
-            save_dir = str(params.get("save_dir", "") or "").strip()
-            run_name = str(params.get("run_name", "") or "").strip()
-            if save_dir:
-                save_path = Path(save_dir)
-                project = save_path.parent.as_posix()
-                name = run_name or save_path.name
-                command.append(f"project={project}")
-                command.append(f"name={name}")
-            elif run_name:
-                command.append(f"name={run_name}")
-
-            lines.append(self._format_command(command, target_platform))
-            return "\n".join(lines)
-
-        if action.action_name == "export_onnx":
-            command = [
-                "yolo",
-                "export",
-                f"model={params.get('model')}",
-                "format=onnx",
-            ]
-            for name in ["imgsz", "opset"]:
-                value = params.get(name)
-                if value not in (None, ""):
-                    command.append(f"{name}={value}")
-            if params.get("simplify"):
-                command.append("simplify=True")
-            if params.get("dynamic"):
-                command.append("dynamic=True")
-            if params.get("half"):
-                command.append("half=True")
-            if params.get("device") not in (None, ""):
-                command.append(f"device={params.get('device')}")
-
-            output = str(params.get("output", "") or "").strip()
-            if output:
-                output_path = Path(output)
-                command.append(f"project={output_path.parent.as_posix()}")
-                command.append(f"name={output_path.stem}")
-
-            lines.append(self._format_command(command, target_platform))
-            return "\n".join(lines)
-
-        if action.action_name == "predict":
-            task = str(params.get("task") or "detect")
-            command = [
-                "yolo",
-                task,
-                "predict",
-                f"model={params.get('model')}",
-                f"source={params.get('source')}",
-            ]
-            for name in ["imgsz", "conf", "iou"]:
-                value = params.get(name)
-                if value not in (None, ""):
-                    command.append(f"{name}={value}")
-            if params.get("device") not in (None, ""):
-                command.append(f"device={params.get('device')}")
-            if "save" in params:
-                command.append(f"save={bool(params.get('save'))}")
-            if params.get("save_txt"):
-                command.append("save_txt=True")
-            if params.get("save_conf"):
-                command.append("save_conf=True")
-            if params.get("save_crop"):
-                command.append("save_crop=True")
-
-            output_dir = str(params.get("output_dir", "") or "").strip()
-            if output_dir:
-                output_path = Path(output_dir)
-                command.append(f"project={output_path.parent.as_posix()}")
-                command.append(f"name={output_path.name}")
-
-            lines.append(self._format_command(command, target_platform))
-            return "\n".join(lines)
-
+        command = list(build_yolo_argv(action, params, path_style="posix"))
+        lines.append(self._format_command(command, target_platform))
         return "\n".join(lines)
 
     def _build_command(
@@ -309,150 +224,22 @@ class RunManager(QObject):
         conda_env: CondaEnvInfo | None,
     ) -> tuple[list[str], Path, dict, str]:
         process_env = self._build_process_env(conda_env, self.project_root)
-        if feature.feature_name == "yolo" and action.action_name in ("train", "predict"):
-            command = self._build_yolo_runtime_command(action, params)
-            return command, self.project_root, process_env, command[0]
-
         python_executable = conda_env.python_executable if conda_env else "python"
-        if action.entry.type == "module":
-            command = [python_executable, "-m", action.entry.value]
-            cwd = self.project_root
-        else:
-            command = [python_executable, action.entry.value]
-            cwd = feature.module_dir
-
-        for field in action.schema:
-            if field.name not in params:
-                continue
-            value = params[field.name]
-            if field.action == "store_true":
-                if value:
-                    command.append(field.cli_flag)
-                continue
-            if field.action == "store_false":
-                if not value:
-                    command.append(field.cli_flag)
-                continue
-            if value in (None, ""):
-                continue
-            command.extend([field.cli_flag, str(value)])
-        return command, cwd, process_env, python_executable
+        plan = build_runtime_plan(
+            feature,
+            action,
+            params,
+            python_executable=python_executable,
+            project_root=self.project_root,
+        )
+        return list(plan.argv), plan.cwd, process_env, plan.python_executable
 
     @staticmethod
     def _build_export_command_args(feature: FeatureModule, action: FeatureAction, params: dict) -> list[str]:
-        if action.entry.type == "module":
-            command = ["python", "-m", action.entry.value]
-        else:
-            command = ["python", action.entry.value]
-
-        for field in action.schema:
-            if field.name not in params:
-                continue
-            value = params[field.name]
-            if field.action == "store_true":
-                if value:
-                    command.append(field.cli_flag)
-                continue
-            if field.action == "store_false":
-                if not value:
-                    command.append(field.cli_flag)
-                continue
-            if value in (None, ""):
-                continue
-            command.extend([field.cli_flag, str(value)])
-        return command
+        return list(build_export_argv(feature, action, params))
 
     def _build_yolo_runtime_command(self, action: FeatureAction, params: dict) -> list[str]:
-        if action.action_name == "train":
-            task = str(params.get("task") or "detect")
-            model_name = self._resolve_yolo_model_name(params)
-            command = [
-                "yolo",
-                task,
-                "train",
-                f"data={params.get('data')}",
-                f"model={model_name}",
-            ]
-            for name in ["epochs", "imgsz", "batch", "workers", "patience", "seed"]:
-                value = params.get(name)
-                if value not in (None, ""):
-                    command.append(f"{name}={value}")
-            if params.get("device") not in (None, ""):
-                command.append(f"device={params.get('device')}")
-            if params.get("cache"):
-                command.append("cache=True")
-            if params.get("amp"):
-                command.append("amp=True")
-
-            save_dir = str(params.get("save_dir", "") or "").strip()
-            run_name = str(params.get("run_name", "") or "").strip()
-            if save_dir:
-                save_path = Path(save_dir)
-                command.append(f"project={save_path.parent}")
-                command.append(f"name={run_name or save_path.name}")
-            elif run_name:
-                command.append(f"name={run_name}")
-            return command
-
-        if action.action_name == "export_onnx":
-            command = [
-                "yolo",
-                "export",
-                f"model={params.get('model')}",
-                "format=onnx",
-            ]
-            for name in ["imgsz", "opset"]:
-                value = params.get(name)
-                if value not in (None, ""):
-                    command.append(f"{name}={value}")
-            if params.get("simplify"):
-                command.append("simplify=True")
-            if params.get("dynamic"):
-                command.append("dynamic=True")
-            if params.get("half"):
-                command.append("half=True")
-            if params.get("device") not in (None, ""):
-                command.append(f"device={params.get('device')}")
-
-            output = str(params.get("output", "") or "").strip()
-            if output:
-                output_path = Path(output)
-                command.append(f"project={output_path.parent}")
-                command.append(f"name={output_path.stem}")
-            return command
-
-        if action.action_name == "predict":
-            task = str(params.get("task") or "detect")
-            command = [
-                "yolo",
-                task,
-                "predict",
-                f"model={params.get('model')}",
-                f"source={params.get('source')}",
-            ]
-            for name in ["imgsz", "conf", "iou"]:
-                value = params.get(name)
-                if value not in (None, ""):
-                    command.append(f"{name}={value}")
-            if params.get("device") not in (None, ""):
-                command.append(f"device={params.get('device')}")
-            if "save" in params:
-                command.append(f"save={bool(params.get('save'))}")
-            if params.get("save_txt"):
-                command.append("save_txt=True")
-            if params.get("save_conf"):
-                command.append("save_conf=True")
-            if params.get("save_crop"):
-                command.append("save_crop=True")
-
-            output_dir = str(params.get("output_dir", "") or "").strip()
-            if output_dir:
-                output_path = Path(output_dir)
-                command.append(f"project={output_path.parent}")
-                command.append(f"name={output_path.name}")
-            return command
-
-        return ["yolo"]
+        return list(build_yolo_argv(action, params, path_style="native"))
 
     @staticmethod
     def _is_directory_output_arg(arg_name: str) -> bool:
@@ -467,39 +254,24 @@ class RunManager(QObject):
         default_file_name: str | None,
         use_artifacts_subdir: bool,
     ) -> Path | None:
-        user_value = str(params.get(arg_name, "") or "").strip()
-        field = next((item for item in action.schema if item.name == arg_name), None)
-        is_directory = self._is_directory_output_target(arg_name, field.path_mode if field else None)
-        force_managed_output = bool(field and field.hidden)
-
-        if force_managed_output:
-            user_value = ""
+        plan = plan_output_target(
+            action,
+            arg_name,
+            params,
+            artifacts_dir,
+            default_file_name=default_file_name,
+            use_artifacts_subdir=use_artifacts_subdir,
+        )
+        if plan.clear_existing:
             params[arg_name] = ""
-
-        if user_value:
-            output_path = Path(user_value).expanduser().resolve()
-            if is_directory:
-                output_path.mkdir(parents=True, exist_ok=True)
-                params[arg_name] = str(output_path)
-                return output_path
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            params[arg_name] = str(output_path)
-            return output_path.parent
-
-        if not use_artifacts_subdir:
+        if plan.target is None:
             return None
 
-        if is_directory:
-            params[arg_name] = str(artifacts_dir)
-            return artifacts_dir
-
-        if not default_file_name:
-            return None
-
-        default_path = artifacts_dir / default_file_name
-        default_path.parent.mkdir(parents=True, exist_ok=True)
-        params[arg_name] = str(default_path)
-        return default_path.parent
+        output_path = plan.target.expanduser().resolve() if plan.normalize_user_path else plan.target
+        target_dir = output_path if plan.is_directory else output_path.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        params[arg_name] = str(output_path)
+        return target_dir
 
     @staticmethod
     def _is_directory_output_target(arg_name: str, path_mode: str | None) -> bool:
@@ -511,21 +283,7 @@ class RunManager(QObject):
 
     @staticmethod
     def _resolve_yolo_model_name(params: dict) -> str:
-        custom_model = str(params.get("custom_model", "") or "").strip()
-        if custom_model:
-            return custom_model
-
-        task = str(params.get("task") or "detect")
-        series = str(params.get("model_series") or "yolo11")
-        size = str(params.get("model_size") or "n")
-        base = f"{series}{size}"
-        if task == "segment":
-            return f"{base}-seg.pt"
-        if task == "classify":
-            return f"{base}-cls.pt"
-        if task == "pose":
-            return f"{base}-pose.pt"
-        return f"{base}.pt"
+        return resolve_yolo_model_name(params)
 
     @staticmethod
     def _format_command(command: list[str], target_platform: str) -> str:
@@ -552,10 +310,7 @@ class RunManager(QObject):
 
     @staticmethod
     def _module_pythonpath_entries(project_root: Path) -> list[Path]:
-        return [
-            project_root / "modules",
-            project_root / "shared" / "cabf_common",
-        ]
+        return list(planned_pythonpath_entries(project_root))
 
     def _format_pythonpath_for_export(self, target_platform: str) -> str:
         entries = [

@@ -62,7 +62,7 @@
         "model_name": {
           "label": "模型结构",
           "group": "模型参数",
-          "help": "优先使用 cosmos/train/models 中的 EdgeGraphNet。"
+          "help": "优先通过 CAB-F 根入口取得项目内 EdgeGraphNet。"
         },
         "point_source": {
           "label": "点来源模式",

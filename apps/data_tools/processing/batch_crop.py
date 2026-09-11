@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
+from img_tools.core.crop_plan import CropRegion, build_image_crop_plan
 
 from .image_io import read_image, write_image
 from ..common.helpers import ensure_dir, get_image_files
@@ -30,20 +30,24 @@ def crop_single_image(
     ensure_dir(output_dir)
 
     h, w = img.shape[:2]
-    sx = w / ref_width
-    sy = h / ref_height
+    plan = build_image_crop_plan(
+        source_name=image_path,
+        image_size=(w, h),
+        regions=(
+            CropRegion(x1, y1, x2, y2, f"roi_{index}")
+            for index, (x1, y1, x2, y2) in enumerate(rects, start=1)
+        ),
+        reference_size=(ref_width, ref_height),
+        coordinate_mode="scaled",
+        scale_semantics="edges",
+        suffix_mode="preserve",
+    )
     total = 0
 
-    for ri, (x1, y1, x2, y2) in enumerate(rects):
-        cx1 = max(0, round(x1 * sx))
-        cy1 = max(0, round(y1 * sy))
-        cx2 = min(w, round(x2 * sx))
-        cy2 = min(h, round(y2 * sy))
-        if cx2 <= cx1 or cy2 <= cy1:
-            continue
-        crop = img[cy1:cy2, cx1:cx2]
-        name = f"{Path(image_path).stem}_roi_{ri + 1}{Path(image_path).suffix}"
-        out_path = os.path.join(output_dir, name)
+    for operation in plan.operations:
+        x1, y1, x2, y2 = operation.box
+        crop = img[y1:y2, x1:x2]
+        out_path = os.path.join(output_dir, operation.output_name)
         write_image(out_path, crop)
         total += 1
 

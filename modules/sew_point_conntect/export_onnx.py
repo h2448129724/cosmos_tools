@@ -23,17 +23,19 @@ def export_connector_onnx(
     import torch
 
     from algo.models.ort_providers import get_default_ort_providers
-    from train.models.sew_point_connector import EdgeGraphCore, EdgePatchEncoder
-    from train.tools.export_sew_point_connector_onnx import (
-        build_model,
-        compare_split_graph,
-        compare_torch_models,
-        export_graph_core,
-        export_patch_encoder,
-        load_checkpoint,
-        load_real_graph,
-        make_probe_graph,
-    )
+    from cosmos_toolbox.training.cab_f_project import project_entry
+
+    cab_f = project_entry()
+    EdgeGraphCore = cab_f.EdgeGraphCore
+    EdgePatchEncoder = cab_f.EdgePatchEncoder
+    build_model = cab_f.build_model
+    compare_split_graph = cab_f.compare_split_graph
+    compare_torch_models = cab_f.compare_torch_models
+    export_graph_core = cab_f.export_graph_core
+    export_patch_encoder = cab_f.export_patch_encoder
+    load_checkpoint = cab_f.load_checkpoint
+    load_real_graph = cab_f.load_real_graph
+    make_probe_graph = cab_f.make_probe_graph
 
     requested_device = str(device).lower()
     torch_device = torch.device("cuda" if requested_device == "cuda" and torch.cuda.is_available() else "cpu")

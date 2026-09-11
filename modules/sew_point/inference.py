@@ -14,10 +14,12 @@ import torch
 
 try:
     from .model_registry import DEFAULT_MODEL, get_model, model_choices
-    from .utils import _imread, _imwrite, detect_peaks
+    from .utils import _imread, _imwrite
+    from .inference_core import apply_tta, combine_tta_heatmaps, decode_checkpoint, detect_peaks, tta_plan
 except ImportError:
     from model_registry import DEFAULT_MODEL, get_model, model_choices
-    from utils import _imread, _imwrite, detect_peaks
+    from utils import _imread, _imwrite
+    from inference_core import apply_tta, combine_tta_heatmaps, decode_checkpoint, detect_peaks, tta_plan
 
 
 class KeypointDetector:
@@ -33,11 +35,9 @@ class KeypointDetector:
         self.threshold = threshold
         self.cluster_dist = cluster_dist
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
-        if isinstance(checkpoint, dict) and "model_state" in checkpoint:
-            model_name = str(checkpoint.get("model_key") or model_name)
-            state = checkpoint["model_state"]
-        else:
-            state = checkpoint
+        decoded = decode_checkpoint(checkpoint, model_name)
+        model_name = decoded.model_name or model_name
+        state = decoded.state
         self.model = get_model(model_name).to(self.device)
         self.model.load_state_dict(state, strict=True)
         self.model.eval()
@@ -57,15 +57,15 @@ class KeypointDetector:
         if not use_tta:
             return infer(to_tensor(img_bgr))[np.newaxis]
 
-        heatmaps = [infer(to_tensor(img_bgr))]
-        heatmaps.append(infer(to_tensor(img_bgr[:, ::-1, :].copy()))[:, ::-1])
-        heatmaps.append(infer(to_tensor(img_bgr[::-1, :, :].copy()))[::-1, :])
-        heatmaps.append(infer(to_tensor(img_bgr[::-1, ::-1, :].copy()))[::-1, ::-1])
-        for k in [1, 2, 3]:
-            rot = cv2.resize(np.rot90(img_bgr, k).copy(), (w, h))
-            hm = infer(to_tensor(rot))
-            heatmaps.append(np.rot90(cv2.resize(hm, (w, h)), 4 - k))
-        return np.mean(heatmaps, axis=0)[np.newaxis]
+        heatmaps = []
+        plan = tta_plan(h, w)
+        for path in plan:
+            transformed = apply_tta(img_bgr, path).copy()
+            if path.model_shape != path.native_shape:
+                transformed = cv2.resize(transformed, (path.model_shape[1], path.model_shape[0]))
+            hm = infer(to_tensor(transformed))
+            heatmaps.append(hm)
+        return combine_tta_heatmaps(heatmaps, (h, w), plan=plan, resize_fn=cv2.resize)
 
     def detect(self, image_path, use_tta=True):
         img_bgr = _imread(image_path)

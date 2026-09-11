@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
 )
 
 from apps.data_tools.processing.keyword_split import classify_by_keywords
-from .base import BaseToolPage, FuncWorker, make_card, make_log_box, make_log_card, make_page_header, set_primary
+from cosmos_toolbox.ui import ActionBar, PageScaffold, PathField, SectionSurface, StatusBanner
+from .base import BaseToolPage, make_log_box, make_log_card, set_primary
 
 
 class KeywordSplitPage(BaseToolPage):
@@ -33,98 +34,73 @@ class KeywordSplitPage(BaseToolPage):
         self._build_ui()
 
     def _build_ui(self):
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
+        scaffold = PageScaffold("关键字划分", "根据文件名关键字将图片自动分类到子文件夹。")
+        QVBoxLayout(self).addWidget(scaffold)
+        lay = scaffold.content_layout
 
-        lay.addWidget(make_page_header("关键字划分", "根据文件名关键字将图片自动分类到子文件夹。"))
-
-        settings_card = make_card()
-        settings_lay = QVBoxLayout(settings_card)
-        settings_lay.setContentsMargins(18, 16, 18, 16)
-        settings_lay.setSpacing(10)
-
-        self._in_entry, r1 = self._dir_row("输入图片目录")
-        settings_lay.addLayout(r1)
-        self._out_entry, r2 = self._dir_row("输出目录")
-        settings_lay.addLayout(r2)
+        settings_card = SectionSurface("输入与输出", "选择目录和处理方式。")
+        settings_lay = settings_card.body_layout
+        input_field = PathField("输入图片目录", placeholder="选择输入目录", browse_text="浏览")
+        output_field = PathField("输出目录", placeholder="选择输出目录", browse_text="浏览")
+        input_field.browse_requested.connect(lambda: self._pick_dir(input_field.line_edit))
+        output_field.browse_requested.connect(lambda: self._pick_dir(output_field.line_edit))
+        self._in_entry, self._out_entry = input_field.line_edit, output_field.line_edit
+        settings_lay.addWidget(input_field)
+        settings_lay.addWidget(output_field)
 
         mode_row = QHBoxLayout()
         mode_label = QLabel("处理方式")
-        mode_label.setFixedWidth(92)
+        mode_label.setAccessibleName("处理方式")
         mode_row.addWidget(mode_label)
         self._rb_copy = QRadioButton("复制")
+        self._rb_copy.setAccessibleName("复制模式")
         self._rb_copy.setChecked(True)
         self._rb_move = QRadioButton("移动")
+        self._rb_move.setAccessibleName("移动模式")
         mode_row.addWidget(self._rb_copy)
         mode_row.addWidget(self._rb_move)
         mode_row.addStretch(1)
         settings_lay.addLayout(mode_row)
         lay.addWidget(settings_card)
 
-        work_card = make_card()
-        card_lay = QVBoxLayout(work_card)
-        card_lay.setContentsMargins(18, 16, 18, 16)
-        card_lay.setSpacing(10)
-        title = QLabel("关键字与执行")
-        title.setStyleSheet("color:#111827;font-size:15px;font-weight:700;")
-        card_lay.addWidget(title)
-        hint = QLabel("维护关键字列表后，可先预览再执行分类。")
-        hint.setStyleSheet("color:#6B7280;font-size:12px;")
-        card_lay.addWidget(hint)
+        work_card = SectionSurface("关键字与执行", "维护关键字列表后，可先预览再执行分类。")
+        card_lay = work_card.body_layout
 
         card_lay.addWidget(QLabel("关键字列表（不区分大小写）"))
         kw_row = QHBoxLayout()
         kw_row.setSpacing(10)
         self._kw_list = QListWidget()
+        self._kw_list.setAccessibleName("关键字列表")
         self._kw_list.setMaximumHeight(152)
         for kw in ("top", "bottom"):
             self._kw_list.addItem(kw)
         kw_row.addWidget(self._kw_list, 1)
-        kw_btns = QVBoxLayout()
-        kw_btns.setSpacing(8)
+        kw_btns = ActionBar()
         b_add = QPushButton("添加")
         b_add.clicked.connect(self._add_kw)
         b_del = QPushButton("删除")
         b_del.clicked.connect(self._del_kw)
-        kw_btns.addWidget(b_add)
-        kw_btns.addWidget(b_del)
-        kw_btns.addStretch(1)
-        kw_row.addLayout(kw_btns)
+        kw_btns.add_widget(b_add)
+        kw_btns.add_widget(b_del)
+        kw_row.addWidget(kw_btns)
         card_lay.addLayout(kw_row)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        btn_row = ActionBar()
         b_preview = QPushButton("预览统计")
         b_preview.clicked.connect(self._preview)
         b_run = QPushButton("执行划分")
         set_primary(b_run)
         b_run.clicked.connect(self._run)
-        btn_row.addWidget(b_preview)
-        btn_row.addWidget(b_run)
-        btn_row.addStretch(1)
-        self._summary = QLabel("等待选择输入目录与关键字。")
-        self._summary.setStyleSheet("color:#64748b;")
-        card_lay.addWidget(self._summary)
-        card_lay.addLayout(btn_row)
+        btn_row.add_widget(b_preview)
+        btn_row.add_widget(b_run)
+        self._status_banner = StatusBanner("等待选择输入目录与关键字。")
+        self._summary = self._status_banner.label
+        card_lay.addWidget(self._status_banner)
+        card_lay.addWidget(btn_row)
         lay.addWidget(work_card)
 
         self._log = make_log_box("运行日志...")
         lay.addWidget(make_log_card(self._log))
-
-    def _dir_row(self, label: str) -> tuple:
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        lbl = QLabel(label)
-        lbl.setFixedWidth(92)
-        row.addWidget(lbl)
-        entry = QLineEdit()
-        row.addWidget(entry, 1)
-        btn = QPushButton("浏览")
-        btn.setFixedWidth(72)
-        btn.clicked.connect(lambda: self._pick_dir(entry))
-        row.addWidget(btn)
-        return entry, row
 
     def _pick_dir(self, entry: QLineEdit):
         d = QFileDialog.getExistingDirectory(self._mw, "选择目录", entry.text() or ".")
@@ -163,6 +139,8 @@ class KeywordSplitPage(BaseToolPage):
         self._summary.setText(f"预览完成：命中 {assigned} 个文件，未归类 {counts.get('_unsorted', 0)} 个文件。")
 
     def _run(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
         input_dir = self._in_entry.text().strip()
         output_dir = self._out_entry.text().strip()
         keywords = self._get_keywords()
@@ -178,9 +156,14 @@ class KeywordSplitPage(BaseToolPage):
         mode = "move" if self._rb_move.isChecked() else "copy"
         self._log.clear()
         self._log.appendPlainText(f"开始{mode}：{keywords}")
-        self._worker = FuncWorker(classify_by_keywords, input_dir, keywords, output_dir, mode)
-        self._worker.finished.connect(self._on_done)
-        self._worker.start()
+        self.run_background(
+            classify_by_keywords,
+            input_dir,
+            keywords,
+            output_dir,
+            mode,
+            on_result=self._on_done,
+        )
 
     def _on_done(self, result):
         if isinstance(result, Exception):
