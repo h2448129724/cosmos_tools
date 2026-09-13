@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,19 @@ import time
 from types import SimpleNamespace
 
 PREFIX = 'FIELD_DATASET_EVENT '
+
+
+def preload_torch(on_progress):
+    """Load an existing Torch installation before ORT; never install dependencies."""
+    on_progress({'message': '正在预加载 PyTorch 的 CUDA/cuDNN 动态库…'})
+    try:
+        torch = importlib.import_module('torch')
+        cuda = torch.version.cuda
+        on_progress({'message': f'PyTorch 预加载完成：{torch.__version__}，CUDA：{cuda or "CPU 版本"}；'
+                               '实际 GPU 可用性以模型初始化结果为准。'})
+    except Exception as exc:
+        on_progress({'message': f'PyTorch 预加载失败：{type(exc).__name__}: {exc}。'
+                               '继续使用 ONNX Runtime 原有加载方式；不会自动安装或修改环境。'})
 
 
 def run_in_environment(options, environment_name, control, on_progress, scan_only=False):
@@ -118,6 +132,8 @@ def main():
     try:
         from .paths import ensure_import_paths
         ensure_import_paths()
+        if not request.get('scan_only'):
+            preload_torch(lambda value: emit('progress', value))
         from .field_dataset import run, scan
         options = request['options']
         emit('progress', {'message': f'任务 Python：{sys.executable}'})

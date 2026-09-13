@@ -75,6 +75,23 @@ class FieldDatasetUiTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'missing-env'):
                 run_in_environment({}, 'missing-env', control, lambda value: None)
 
+    def test_torch_preload_reports_version(self):
+        from cosmos_toolbox.field_dataset_runtime import preload_torch
+        messages = []
+        torch = SimpleNamespace(__version__='test', version=SimpleNamespace(cuda='12.4'))
+        with patch('cosmos_toolbox.field_dataset_runtime.importlib.import_module', return_value=torch) as importer:
+            preload_torch(messages.append)
+        importer.assert_called_once_with('torch')
+        self.assertIn('12.4', messages[-1]['message'])
+
+    def test_torch_preload_failure_is_reported_without_installation(self):
+        from cosmos_toolbox.field_dataset_runtime import preload_torch
+        messages = []
+        with patch('cosmos_toolbox.field_dataset_runtime.importlib.import_module', side_effect=ImportError('missing torch')):
+            preload_torch(messages.append)
+        self.assertIn('missing torch', messages[-1]['message'])
+        self.assertIn('不会自动安装', messages[-1]['message'])
+
 
 if __name__ == "__main__":
     unittest.main()
