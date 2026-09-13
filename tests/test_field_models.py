@@ -14,7 +14,7 @@ def test_config_layouts(tmp_path, monkeypatch, modern, residual):
     monkeypatch.setattr(module, 'ROOT', tmp_path)
     monkeypatch.setenv('WEIGHTREG_CACHE', str(tmp_path / 'cache'))
     backend = tmp_path / ('projects/CAB-F/config/backend.yaml' if modern else 'assets/config/backend_config.yaml')
-    product = tmp_path / ('projects/CAB-F/config/products/D01-R.yaml' if modern else 'conf/cabf/D01-R.local.yaml')
+    product = tmp_path / ('projects/CAB-F/config/products/D01-R.yaml' if modern else 'conf/cabf/D01-R.yaml')
     backend.parent.mkdir(parents=True)
     product.parent.mkdir(parents=True)
     backend.write_text('cab_f:\n  knife_checker: {}\n  sew_point_density:\n    connect_model_path: missing.onnx\n    patch_model_path: missing_patch.onnx\n', encoding='utf-8')
@@ -29,6 +29,12 @@ def test_config_layouts(tmp_path, monkeypatch, modern, residual):
     assert model.project_layout is modern
     assert 'knife_segment' in model.config
     assert model.template_root == (product.parent if modern else tmp_path)
+    local = product.with_name('D01-R.local.yaml')
+    local.write_text('inspection:\n  custom_marker: true\n', encoding='utf-8')
+    assert 'custom_marker' not in FieldModels('D01-R').inspection
+    explicit = FieldModels('D01-R', product_config=local)
+    assert explicit.inspection['custom_marker'] is True
+    assert explicit.product_config_path == local.resolve()
 
 
 def test_missing_config_group_has_actionable_error(tmp_path, monkeypatch):

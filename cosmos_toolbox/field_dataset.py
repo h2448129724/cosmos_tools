@@ -108,7 +108,8 @@ def _save_sample(folder, sample, identity, model, mode):
             'files': sorted(p.name for p in folder.iterdir() if p.is_file())}
 
 
-def run(source, output, product, selected, face='all', mode='auto', limit=None, control=None, on_progress=None):
+def run(source, output, product, selected, face='all', mode='auto', limit=None, control=None, on_progress=None,
+        product_config=None):
     from .paths import ensure_import_paths
     ensure_import_paths()
     import cv2
@@ -142,7 +143,9 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
     models = None
     processed = skipped = failures = 0
     try:
-        models = FieldModels(product)
+        models = FieldModels(product, product_config=product_config) if product_config else FieldModels(product)
+        if on_progress and getattr(models, 'product_config_path', None):
+            on_progress({'message': f'实际产品配置：{models.product_config_path}'})
         snapshot = getattr(models, 'snapshot', {'product': product})
         if callable(snapshot):
             snapshot = snapshot()
@@ -264,6 +267,7 @@ def main():
     parser.add_argument('--face', default='all', choices=['all', 'top', 'bottom'])
     parser.add_argument('--mode', default='auto', choices=['auto', 'images'])
     parser.add_argument('--limit', type=int)
+    parser.add_argument('--product-config', help='Optional product YAML; defaults to the selected product .yaml')
     args = vars(parser.parse_args()); args['selected'] = args.pop('models')
     print(run(**args, on_progress=lambda p: print(json.dumps(p, ensure_ascii=False), flush=True)))
 

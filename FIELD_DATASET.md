@@ -48,6 +48,21 @@ conda run --no-capture-output -n onnx-gpu python -m cosmos_toolbox.field_dataset
 
 ## 验证
 
+### 产品配置文件
+
+默认读取 `conf/cabf/D01-L.yaml` 或 `D01-R.yaml`（不带 `.local`）。
+界面“产品配置文件”可选任意 YAML，包括原来的 `.local.yaml`；留空恢复默认。
+CLI 对应 `--product-config 路径`。程序只读所选文件，不与其他 YAML 合并，
+运行日志和模型快照记录实际绝对路径。所选款号仍由界面指定，不从文件名推断。
+
+配置须为 UTF-8 YAML，顶层 `inspection` 为映射。二维码与加强布导出需要
+`inspection.conf.top/bottom.decode_image.rois` 或 `reinforcement.roi` 的四坐标
+`[x_min, y_min, x_max, y_max]`，以及 `inspection.match_template` 的 top、bottom 模板。
+缺少对应面的 ROI 会使该任务失败，不要求仅做其他模型时也补齐这些字段。
+当前 dev 分支相对模板路径仍相对于 Cosmos 根目录；例如 `conf/CAB_F_D01_0.png`。
+自定义 YAML 所在目录不会改变此规则，也可使用模板绝对路径。
+模型权重与阈值仍读取 `assets/config/backend_config.yaml` 的 `cab_f`，不受产品配置选择影响。
+
 ### 选择执行环境
 
 界面“执行 Conda 环境”默认 `onnx-gpu`。点击“加载环境列表”后选择环境，

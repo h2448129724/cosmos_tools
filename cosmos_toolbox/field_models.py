@@ -49,7 +49,7 @@ class _ToolGlueRGBAdapter:
 class FieldModels:
     """Lazy sessions shared across images, intermediate crops shared within an image."""
 
-    def __init__(self, product: str):
+    def __init__(self, product: str, product_config=None):
         if product not in {'D01-L', 'D01-R'}:
             raise ValueError(f'Unsupported CAB-F product: {product}')
         self.product = product
@@ -66,14 +66,15 @@ class FieldModels:
         self.project_layout = (backend_path.is_file() and
                                (project_root / 'algorithms/yolo_adapter.py').is_file())
         if self.project_layout:
-            product_path = products_root / f'{product}.local.yaml'
-            if not product_path.is_file():
-                product_path = products_root / f'{product}.yaml'
+            product_path = products_root / f'{product}.yaml'
             self.template_root = products_root
         else:
             backend_path = ROOT / 'assets/config/backend_config.yaml'
-            product_path = ROOT / f'conf/cabf/{product}.local.yaml'
+            product_path = ROOT / f'conf/cabf/{product}.yaml'
             self.template_root = ROOT
+        if product_config:
+            product_path = Path(product_config).expanduser().resolve()
+        self.product_config_path = product_path.resolve()
         self.config = self._read_group(backend_path, 'cab_f')
         self.inspection = self._read_group(product_path, 'inspection')
         self.config['knife_segment'] = dict(self.config['knife_checker'])
@@ -83,7 +84,8 @@ class FieldModels:
         cache_dir = Path(os.environ.get('WEIGHTREG_CACHE', Path.home() / '.cache/weightreg'))
         manifest_path = cache_dir / 'resolved.json'
         manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
-        self.snapshot = {'product': product, 'product_sha256': self._hash(product_path),
+        self.snapshot = {'product': product, 'product_config_path': str(self.product_config_path),
+                         'product_sha256': self._hash(product_path),
                          'backend_sha256': self._hash(backend_path), 'models': {}}
         for name, config in self.config.items():
             if not isinstance(config, dict):

@@ -59,7 +59,7 @@ class FieldDatasetUiTest(unittest.TestCase):
 
     def test_selected_environment_routes_to_child_runner(self):
         control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
-        options = {'source': 'fixture'}
+        options = {'source': 'fixture', 'product_config': 'D:/configs/custom.yaml'}
         worker = DatasetWorker(options, control, environment_name='custom-gpu')
         received = []
         worker.result.connect(received.append)

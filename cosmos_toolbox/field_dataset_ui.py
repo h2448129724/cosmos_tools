@@ -104,6 +104,17 @@ class FieldDatasetPage(QWidget):
         self.limit.setSpecialValueText("全部图片")
         self.limit.setToolTip("设置少量图片进行试运行；0 表示全部。按扫描顺序取样。")
         form.addRow("产品配置", self.product)
+        self.product_config = QLineEdit()
+        self.product_config.setPlaceholderText('留空：读取所选产品的 .yaml（不带 .local）')
+        self.product_config.setToolTip('可指定任意 YAML，包括 .local.yaml；不与默认文件合并。相对模板路径仍遵循 Cosmos 原有规则。')
+        config_row = QWidget()
+        config_layout = QHBoxLayout(config_row)
+        config_layout.setContentsMargins(0, 0, 0, 0)
+        config_layout.addWidget(self.product_config)
+        config_browse = QPushButton('选择 YAML…')
+        config_browse.clicked.connect(self._browse_product_config)
+        config_layout.addWidget(config_browse)
+        form.addRow('产品配置文件', config_row)
         form.addRow("正反面", self.face)
         form.addRow("生成方式", self.mode)
         form.addRow("本次最多处理", self.limit)
@@ -182,6 +193,14 @@ class FieldDatasetPage(QWidget):
         self.tabs.addTab(preview, "样本预览")
         layout.addWidget(self.tabs, 2)
         self._set_busy(False)
+
+    def _browse_product_config(self):
+        from .paths import COSMOS_ROOT
+        path, _ = QFileDialog.getOpenFileName(self, '选择产品配置',
+            self.product_config.text().strip() or str(COSMOS_ROOT / 'conf/cabf'),
+            'YAML 配置 (*.yaml *.yml);;所有文件 (*)')
+        if path:
+            self.product_config.setText(path)
 
     def _load_environments(self):
         from shared.conda_runtime import CondaEnvManager
@@ -322,6 +341,12 @@ class FieldDatasetPage(QWidget):
         self.control.stopped.clear()
         options = dict(source=source, output=output, product=self.product.currentText(), selected=selected,
                        face=self.face.currentData(), mode=self.mode.currentData(), limit=self.limit.value() or None)
+        config_path = self.product_config.text().strip()
+        if config_path:
+            if not Path(config_path).is_file():
+                QMessageBox.warning(self, '产品配置', '选择的配置文件不存在。')
+                return
+            options['product_config'] = str(Path(config_path).resolve())
         environment_name = self.environment.currentText().strip()
         if not environment_name:
             QMessageBox.warning(self, 'Conda 环境', '请选择或输入执行环境名称。')
