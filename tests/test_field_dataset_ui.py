@@ -25,6 +25,7 @@ class FieldDatasetUiTest(unittest.TestCase):
         page = FieldDatasetPage()
         self.assertEqual(set(page.checks), set(MODEL_IDS))
         self.assertEqual(len(page.checks), 14)
+        self.assertEqual(page.environment.currentText(), 'onnx-gpu')
         page._select("all")
         self.assertTrue(all(c.isChecked() for c in page.checks.values()))
         page._select("none")
@@ -55,6 +56,24 @@ class FieldDatasetUiTest(unittest.TestCase):
         planned = plan_default_capabilities([], include_project_capabilities=True)
         item = next(p for p in planned if p.spec.key == "cabf.field_dataset")
         self.assertEqual(item.page_factory_key, "cabf_field_dataset")
+
+    def test_selected_environment_routes_to_child_runner(self):
+        control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
+        options = {'source': 'fixture'}
+        worker = DatasetWorker(options, control, environment_name='custom-gpu')
+        received = []
+        worker.result.connect(received.append)
+        with patch('cosmos_toolbox.field_dataset_runtime.run_in_environment', return_value={'samples': 1}) as runner:
+            worker.run()
+        self.assertEqual(runner.call_args.args[:3], (options, 'custom-gpu', control))
+        self.assertEqual(received, [{'samples': 1}])
+
+    def test_missing_environment_does_not_fall_back(self):
+        from cosmos_toolbox.field_dataset_runtime import run_in_environment
+        control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
+        with patch('shared.conda_runtime.CondaEnvManager.find', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'missing-env'):
+                run_in_environment({}, 'missing-env', control, lambda value: None)
 
 
 if __name__ == "__main__":

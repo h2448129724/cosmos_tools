@@ -34,6 +34,18 @@ def shape(label, points, kind='rectangle', score=None, group_id=None):
             'description': 'model pseudo-label', 'score': score}
 
 
+class _ToolGlueRGBAdapter:
+    """Tool-local BGR boundary; never modify the shared Cosmos segmenter."""
+
+    def __init__(self, segmenter):
+        self.segmenter = segmenter
+        self.session = segmenter.session
+
+    def predict_proba_batch(self, images):
+        return self.segmenter.predict_proba_batch(
+            [cv2.cvtColor(image, cv2.COLOR_BGR2RGB) for image in images])
+
+
 class FieldModels:
     """Lazy sessions shared across images, intermediate crops shared within an image."""
 
@@ -258,7 +270,7 @@ class FieldModels:
             # Reuse the existing segmentation session rather than loading twice.
             extractor = object.__new__(GlueExtractor)
             extractor.model_path = self.config['glue_segment']['path']
-            extractor.segmenter = model
+            extractor.segmenter = _ToolGlueRGBAdapter(model)
             extractor.thresh = self.config['glue_segment'].get('conf', .9)
             params = dict(self.inspection['match_template'][0 if self.face == 'top' else 1])
             params['path'] = str((self.template_root / params['path']).resolve())
@@ -357,8 +369,9 @@ class FieldModels:
             if name == 'knife_segment':
                 masks = model.predict_mask(image, self.config[name].get('threshold', .5))
             elif name == 'glue_segment':
-                # GlueExtractor's production preprocessing deliberately keeps BGR channel order.
-                masks = {'glue': model.predict_mask(image, self.config[name].get('conf', .9))}
+                # Only this tool converts its OpenCV crops to the model's RGB input.
+                masks = {'glue': model.predict_mask(cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+                                                    self.config[name].get('conf', .9))}
             else:
                 masks = {'reinforcement': model.detect(image)}
             masks = {label: cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)

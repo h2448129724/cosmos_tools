@@ -25,14 +25,20 @@ class DatasetWorker(QThread):
     result = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, options: dict, control, scan_only: bool = False, parent=None):
+    def __init__(self, options: dict, control, scan_only: bool = False, parent=None, environment_name=None):
         super().__init__(parent)
         self.options = options
         self.control = control
         self.scan_only = scan_only
+        self.environment_name = environment_name
 
     def run(self):
         try:
+            if self.environment_name:
+                from .field_dataset_runtime import run_in_environment
+                self.result.emit(run_in_environment(self.options, self.environment_name, self.control,
+                                                    self.progress.emit, self.scan_only))
+                return
             from .field_dataset import run, scan
 
             if self.scan_only:
@@ -73,6 +79,18 @@ class FieldDatasetPage(QWidget):
         self.output = QLineEdit()
         form.addRow("原图文件夹", self._folder_row(self.source))
         form.addRow("输出文件夹", self._folder_row(self.output))
+        self.environment = QComboBox()
+        self.environment.setEditable(True)
+        self.environment.addItem('onnx-gpu')
+        self.environment.setToolTip('任务在所选 Conda 环境中运行；缺少依赖会报错，不会自动安装。')
+        environment_row = QWidget()
+        environment_layout = QHBoxLayout(environment_row)
+        environment_layout.setContentsMargins(0, 0, 0, 0)
+        environment_layout.addWidget(self.environment)
+        refresh_environments = QPushButton('加载环境列表')
+        refresh_environments.clicked.connect(self._load_environments)
+        environment_layout.addWidget(refresh_environments)
+        form.addRow('执行 Conda 环境', environment_row)
         self.product = QComboBox()
         self.product.addItems(["D01-R", "D01-L"])
         self.face = QComboBox()
@@ -164,6 +182,16 @@ class FieldDatasetPage(QWidget):
         self.tabs.addTab(preview, "样本预览")
         layout.addWidget(self.tabs, 2)
         self._set_busy(False)
+
+    def _load_environments(self):
+        from shared.conda_runtime import CondaEnvManager
+        current = self.environment.currentText().strip() or 'onnx-gpu'
+        names = [item.name for item in CondaEnvManager().list_envs(refresh=True)]
+        self.environment.clear()
+        self.environment.addItems(list(dict.fromkeys([current, 'onnx-gpu', *names])))
+        self.environment.setCurrentText(current)
+        if not names:
+            QMessageBox.warning(self, 'Conda 环境', '未读取到环境列表，请确认 Conda 可用；也可手动输入环境名称。')
 
     def _update_dependencies(self):
         from .field_dataset import MODEL_DEPENDENCIES, MODEL_IDS
@@ -294,7 +322,11 @@ class FieldDatasetPage(QWidget):
         self.control.stopped.clear()
         options = dict(source=source, output=output, product=self.product.currentText(), selected=selected,
                        face=self.face.currentData(), mode=self.mode.currentData(), limit=self.limit.value() or None)
-        self.worker = DatasetWorker(options, self.control, scan_only, self)
+        environment_name = self.environment.currentText().strip()
+        if not environment_name:
+            QMessageBox.warning(self, 'Conda 环境', '请选择或输入执行环境名称。')
+            return
+        self.worker = DatasetWorker(options, self.control, scan_only, self, environment_name=environment_name)
         self.worker.progress.connect(self._on_progress)
         self.worker.result.connect(self._on_result)
         self.worker.error.connect(self._on_error)
@@ -349,6 +381,11 @@ class FieldDatasetPage(QWidget):
             self.status.setText(f"扫描到 {result['count']} 张图片，合计 {result['bytes'] / 1024 ** 3:.2f} GiB。损坏图片在解码时检测。")
         else:
             self.status.setText("已停止，保留已完成结果。使用相同配置再次开始可续跑。" if self.control.stopped.is_set() else "生成结束，请查看各模型统计和输出报告。")
+            training = result.get("export", {}).get("training_dataset", {}).get("directory")
+            if result.get("export", {}).get("format") == "xanylabeling":
+                training = result["export"]["directory"]
+            if training and not self.control.stopped.is_set():
+                self.status.setText(f"数据集已生成：{training}（datasets 为中间目录，无需用于训练）")
             self.progress_bar.setValue(0 if self.control.stopped.is_set() else 100)
         self.log.appendPlainText(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 

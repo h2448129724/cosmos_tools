@@ -159,7 +159,7 @@ def test_failed_calibration_cached_for_fixed_roi_branches(adapter, monkeypatch):
     assert calls['calibration'] == 1
 
 
-def test_glue_pseudo_mask_uses_production_bgr_and_threshold(adapter):
+def test_glue_pseudo_mask_uses_rgb_without_changing_source(adapter):
     model, _ = adapter
     model.face = 'top'
     model.config['glue_segment'] = {'conf': .87}
@@ -169,7 +169,8 @@ def test_glue_pseudo_mask_uses_production_bgr_and_threshold(adapter):
     mask[2:8, 3:9] = 255
 
     def predict_mask(actual_image, threshold):
-        assert actual_image is image  # GlueExtractor passes BGR directly to UNet.
+        np.testing.assert_array_equal(actual_image, image[..., ::-1])
+        assert actual_image is not image
         assert threshold == .87
         return mask
 
@@ -178,3 +179,17 @@ def test_glue_pseudo_mask_uses_production_bgr_and_threshold(adapter):
     # Training mask is foreground-positive; only CAD calibration inverts it.
     np.testing.assert_array_equal(sample['masks']['glue'], mask)
     assert sample['shapes'][0]['label'] == 'glue'
+    assert image[0, 0].tolist() == [123, 0, 0]
+
+
+def test_tool_calibration_rgb_adapter_preserves_session_and_bgr_input():
+    from cosmos_toolbox.field_models import _ToolGlueRGBAdapter
+    source = np.array([[[10, 20, 30]]], dtype=np.uint8)
+    session = object()
+    calls = []
+    segmenter = SimpleNamespace(session=session, predict_proba_batch=lambda images: calls.extend(images))
+    wrapper = _ToolGlueRGBAdapter(segmenter)
+    wrapper.predict_proba_batch([source])
+    assert wrapper.session is session
+    assert calls[0][0, 0].tolist() == [30, 20, 10]
+    assert source[0, 0].tolist() == [10, 20, 30]

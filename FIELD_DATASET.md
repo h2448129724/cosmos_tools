@@ -48,6 +48,15 @@ conda run --no-capture-output -n onnx-gpu python -m cosmos_toolbox.field_dataset
 
 ## 验证
 
+### 选择执行环境
+
+界面“执行 Conda 环境”默认 `onnx-gpu`。点击“加载环境列表”后选择环境，
+也可手动输入已存在的环境名称。扫描、试跑和生成均在所选环境的独立 Python
+进程内执行；暂停、继续和安全停止通过进程间控制传递，日志显示实际 Python 路径。
+缺失环境或依赖会明确报错，不会自动安装、升级或退回其他环境。
+界面本身不重启，也不更换其环境。若需指定界面的启动环境，启动脚本支持
+`scripts/field_dataset.ps1 -CondaEnvironment onnx-gpu`。
+
 ```powershell
 conda run --no-capture-output -n onnx-gpu python -m pytest tests/test_field_dataset_core.py tests/test_field_dataset_ui.py tests/test_field_export.py tests/test_field_models.py -q
 ```

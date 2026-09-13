@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -6,7 +7,30 @@ import cv2
 import numpy as np
 import pytest
 
-from cosmos_toolbox.field_dataset_export import export
+from functools import partial
+from cosmos_toolbox.field_dataset_export import export as default_export
+
+# Retain regression coverage for explicit legacy multi-format exports.
+export = partial(default_export, xany_only=False)
+
+
+@pytest.mark.parametrize('empty', [True, False])
+def test_default_export_is_one_xany_pair_per_sample(tmp_path, empty):
+    sample(tmp_path, shapes=[] if empty else None)
+    report = default_export(tmp_path)
+    root = Path(report['directory'])
+    assert report['valid'] and report['samples'] == 1
+    assert 'training_dataset' not in report
+    assert len(list(root.rglob('*.png'))) == 1
+    expected = root / ('_review/roi_detector' if empty else 'roi_detector')
+    image = next(expected.glob('*.png'))
+    annotation = json.loads(image.with_suffix('.json').read_text(encoding='utf-8'))
+    assert annotation['imagePath'] == image.name
+    assert annotation['field_metadata']['product'] == 'D01-R'
+    assert not (root / 'training_datasets').exists()
+    assert not any(p.name in {'train', 'val'} for p in root.rglob('*') if p.is_dir())
+    assert not list(root.rglob('data.yaml'))
+    assert not list(root.rglob('mask_*.png'))
 
 
 def sample(tmp_path, model='roi_detector', shapes=None, metadata=None, text='0 0.5 0.5 0.5 0.5'):
@@ -32,6 +56,7 @@ def test_detection_snapshot_preserves_previous_export_and_sources(tmp_path):
     first = export(tmp_path)
     assert first['valid'] and first['samples'] == 1
     root = Path(first['directory'])
+    assert re.fullmatch(r'candidates_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+', root.name)
     label = next(root.glob('*/D01-R/top/yolo_candidates/labels/train/*.txt'))
     original_label = label.read_bytes()
     second = export(tmp_path)
@@ -42,6 +67,12 @@ def test_detection_snapshot_preserves_previous_export_and_sources(tmp_path):
     data = json.loads(annotation.read_text())
     assert data['field_metadata']['annotation_status'] == 'review'
     assert (annotation.parent / data['imagePath']).is_file()
+    flat = Path(first['training_dataset']['directory'])
+    assert (flat / 'roi_detector/data.yaml').is_file()
+    assert len(list((flat / 'roi_detector/images/train').glob('*.png'))) == 1
+    assert len(list((flat / 'roi_detector/labels/train').glob('*.txt'))) == 1
+    assert not (flat / 'roi_detector/D01-R').exists()
+    assert len(list((flat / '_review/roi_detector/train').glob('*.json'))) == 1
 
 
 def test_empty_detection_kept_only_for_review(tmp_path):
