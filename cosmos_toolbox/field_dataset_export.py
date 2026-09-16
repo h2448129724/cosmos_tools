@@ -102,7 +102,7 @@ def flatten_snapshot(snapshot, destination=None):
     return report
 
 
-def export(output, models=None, *, xany_only=True):
+def export(output, models=None, *, xany_only=True, source=None):
     """Export a fresh snapshot; never overwrite earlier exports or source annotations.
 
     The returned report describes structural validation, not annotation accuracy.
@@ -112,9 +112,14 @@ def export(output, models=None, *, xany_only=True):
     database = output / 'run.db'
     if not database.is_file():
         raise ValueError('run.db does not exist')
-    # Local wall time is readable on site; nanoseconds retain collision resistance.
+    if source is None:
+        runs = sorted((output / 'runs').glob('*.json'))
+        if runs:
+            source = json.loads(runs[-1].read_text(encoding='utf-8')).get('source')
+    source_name = _part(Path(source).name) if source else 'dataset'
+    # Keep the input folder recognizable; timestamp distinguishes export snapshots.
     stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    destination = output / 'exports' / f'candidates_{stamp}_{time.time_ns()}'
+    destination = output / 'exports' / f'{source_name}_candidates_{stamp}_{time.time_ns()}'
     destination.mkdir(parents=True, exist_ok=False)
     report = {'directory': str(destination), 'annotation_status': 'review',
               'format': 'xanylabeling' if xany_only else 'multi_format',
@@ -158,7 +163,15 @@ def export(output, models=None, *, xany_only=True):
                     raise ValueError('Invalid split')
                 relative = Path(_part(model)) / _part(record['product']) / _part(record['face'])
                 root = destination / relative
-                name = hashlib.sha256(str(folder.relative_to(output)).encode()).hexdigest()[:24]
+                metadata = annotation.get('field_metadata', {})
+                original_source = record.get('source') or metadata.get('source')
+                original_stem = _part(Path(original_source).stem) if original_source else 'image'
+                # Readable source name + crop index + stable identity. The suffix is
+                # deterministic, distinguishing same-name sources and model versions.
+                crop = _part(folder.name)
+                identity = f'{original_source}|{folder.relative_to(output)}'
+                suffix = hashlib.sha256(identity.encode()).hexdigest()[:16]
+                name = f'{original_stem}__crop_{crop}__{suffix}'
                 text = folder / 'image.txt'
                 classes = None
                 lines = []

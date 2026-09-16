@@ -56,7 +56,7 @@ def test_detection_snapshot_preserves_previous_export_and_sources(tmp_path):
     first = export(tmp_path)
     assert first['valid'] and first['samples'] == 1
     root = Path(first['directory'])
-    assert re.fullmatch(r'candidates_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+', root.name)
+    assert re.fullmatch(r'dataset_candidates_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+', root.name)
     label = next(root.glob('*/D01-R/top/yolo_candidates/labels/train/*.txt'))
     original_label = label.read_bytes()
     second = export(tmp_path)
@@ -73,6 +73,27 @@ def test_detection_snapshot_preserves_previous_export_and_sources(tmp_path):
     assert len(list((flat / 'roi_detector/labels/train').glob('*.txt'))) == 1
     assert not (flat / 'roi_detector/D01-R').exists()
     assert len(list((flat / '_review/roi_detector/train').glob('*.json'))) == 1
+
+
+def test_readable_source_names_are_stable_and_unique(tmp_path):
+    import shutil
+    folder = sample(tmp_path)
+    second = folder.parent / 'second_crop'
+    shutil.copytree(folder, second)
+    records = [dict(directory=str(p), source=str(tmp_path / sub / '原图_top.jpg'),
+                    product='D01-R', face='top', split='train')
+               for p, sub in [(folder, 'a'), (second, 'b')]]
+    with sqlite3.connect(tmp_path / 'run.db') as db:
+        db.execute('UPDATE items SET details=?', (json.dumps(records),))
+    first = default_export(tmp_path, source=tmp_path / '0907')
+    second_run = default_export(tmp_path, source=tmp_path / '0907')
+    assert Path(first['directory']).name.startswith('0907_candidates_')
+    names = {p.name for p in Path(first['directory']).rglob('*.png')}
+    assert len(names) == 2
+    assert all(name.startswith('原图_top__crop_') for name in names)
+    assert names == {p.name for p in Path(second_run['directory']).rglob('*.png')}
+    for path in Path(first['directory']).rglob('*.png'):
+        assert json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))['imagePath'] == path.name
 
 
 def test_empty_detection_kept_only_for_review(tmp_path):

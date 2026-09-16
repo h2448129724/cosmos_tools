@@ -251,7 +251,7 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
         os.replace(temp, output / 'manifest.jsonl')
         if rows and not summary['stopped']:
             from .field_dataset_export import export
-            summary['export'] = export(output, selected)
+            summary['export'] = export(output, selected, source=source)
             _json(output / 'summary.json', summary)
         return summary
     finally:
