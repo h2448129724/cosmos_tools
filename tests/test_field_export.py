@@ -128,6 +128,26 @@ def test_detection_uses_edited_json_not_stale_txt(tmp_path):
     assert not list(Path(deleted['directory']).glob('*/D01-R/top/yolo_candidates/labels/train/*.txt'))
 
 
+@pytest.mark.parametrize('label', ['up', 'down', None, 'unknown'])
+def test_hook_exports_direction_imagefolders(tmp_path, label):
+    folder = sample(tmp_path, model='hook_detector', shapes=[], metadata={'classification': label})
+    (folder / 'image.txt').unlink()
+    report = default_export(tmp_path)
+    assert report['valid'], report
+    root = Path(report['directory'])
+    assert (root / 'hook_detector/up').is_dir()
+    assert (root / 'hook_detector/down').is_dir()
+    if label in {'up', 'down'}:
+        assert len(list((root / 'hook_detector' / label).glob('*.png'))) == 1
+        assert not list((root / 'hook_detector').rglob('*.json'))
+    else:
+        assert not list((root / 'hook_detector').rglob('*.png'))
+        assert len(list((root / '_review/hook_detector').glob('*.json'))) == 1
+    record = json.loads((root / 'manifest.jsonl').read_text(encoding='utf-8'))
+    assert record['classification'] == label
+    assert (root / record['directory'] / record['image']).is_file()
+
+
 def test_qr_rotated_polygon_exports_nine_column_obb_from_json(tmp_path):
     points = [[10, 1], [30, 5], [28, 15], [8, 11]]
     sample(tmp_path, model='qr_yolo_cut', shapes=[dict(label='qr', shape_type='polygon', points=points)],

@@ -242,6 +242,7 @@ def export(output, models=None, *, xany_only=True, source=None):
                         raise ValueError('Mask/image dimension mismatch')
                 classification = annotation.get('field_metadata', {}).get('classification')
                 class_name = _part(classification) if classification is not None else None
+                hook_folder = xany_only and model == 'hook_detector' and class_name in {'up', 'down'}
                 graph = annotation.get('field_metadata', {}).get('graph')
                 if graph is not None:
                     identifiers = set()
@@ -269,10 +270,16 @@ def export(output, models=None, *, xany_only=True, source=None):
                         split=split, source=record.get('source'), empty_detection=empty_detection)
                     if class_name is not None:
                         annotation.setdefault('flags', {})[class_name] = True
+                    if model == 'hook_detector':
+                        for direction in ('up', 'down'):
+                            (destination / 'hook_detector' / direction).mkdir(parents=True, exist_ok=True)
+                        annotation_relative = (Path('hook_detector') / class_name if hook_folder
+                                               else Path('_review') / 'hook_detector')
                 else:
                     annotation_relative = relative / 'xanylabeling' / split
                 _copy(image, destination / annotation_relative / (name + '.png'))
-                _write(destination / annotation_relative / (name + '.json'), annotation)
+                if not hook_folder:
+                    _write(destination / annotation_relative / (name + '.json'), annotation)
                 if lines and not xany_only:
                     _copy(image, root / 'yolo_candidates' / 'images' / split / (name + '.png'))
                     label_path = root / 'yolo_candidates' / 'labels' / split / (name + '.txt')
@@ -300,6 +307,7 @@ def export(output, models=None, *, xany_only=True, source=None):
                 stats['empty_detection_review'] += classes is not None and not lines
                 report['samples'] += 1
                 manifests.append({**record, 'directory': str(annotation_relative),
+                                  'classification': class_name,
                                   'image': name + '.png', 'annotation_status': 'review',
                                   'original_sample_directory': str(folder), 'verified_ground_truth': False})
             except Exception as exc:
@@ -318,6 +326,8 @@ def export(output, models=None, *, xany_only=True, source=None):
     if xany_only:
         for relative in {record['directory'] for record in manifests}:
             folder = destination / relative
+            if Path(relative) in {Path('hook_detector/up'), Path('hook_detector/down')}:
+                continue  # ImageFolder classes encode the label; no sidecar is needed.
             if {p.stem for p in folder.glob('*.png')} != {p.stem for p in folder.glob('*.json')}:
                 report['errors'].append({'directory': str(folder), 'error': 'Orphan image/JSON'})
     for root in ([] if xany_only else destination.glob('*/*/*')):
@@ -337,6 +347,7 @@ def export(output, models=None, *, xany_only=True, source=None):
             stream.write(json.dumps(record, ensure_ascii=False) + '\n')
     (destination / 'README.txt').write_text(
         ('One PNG and matching X-AnyLabeling JSON per sample; no duplicate training export.\n'
+         'Exception: hook_detector/up and hook_detector/down contain classification images only; unknown labels go to _review.\n'
          'Each model folder contains labeled candidates; _review/model contains empty detections. No train/val directories.\n'
          'Segmentation polygons are in shapes; classification is in flags/field_metadata; graphs in field_metadata.\n'
          'All labels are unverified. Source, product, face and split are preserved in manifest.jsonl.\n'

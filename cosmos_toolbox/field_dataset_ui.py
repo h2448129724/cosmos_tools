@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import sys
 import threading
@@ -14,10 +15,20 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
-    QListWidget, QListWidgetItem, QTabWidget,
+    QListWidget, QListWidgetItem, QTabWidget, QTreeView, QListView, QAbstractItemView,
 )
 
 from .paths import ensure_import_paths
+
+
+def configured_product(path):
+    import yaml
+    document = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
+    inspection = document.get('inspection', {}) if isinstance(document, dict) else {}
+    product = inspection.get('product') if isinstance(inspection, dict) else None
+    if product not in {'D01-L', 'D01-R'}:
+        raise ValueError('配置文件 inspection.product 必须是 D01-L 或 D01-R')
+    return product
 
 
 class DatasetWorker(QThread):
@@ -34,22 +45,48 @@ class DatasetWorker(QThread):
 
     def run(self):
         try:
-            if self.environment_name:
-                from .field_dataset_runtime import run_in_environment
-                self.result.emit(run_in_environment(self.options, self.environment_name, self.control,
-                                                    self.progress.emit, self.scan_only))
+            if 'sources' not in self.options:
+                self.result.emit(self._run_one(self.options))
                 return
-            from .field_dataset import run, scan
-
+            base = dict(self.options)
+            sources = base.pop('sources')
+            if base.get('product_config'):
+                base['product'] = configured_product(base['product_config'])
+            results = []
+            errors = []
+            for index, source in enumerate(sources):
+                if self.control.stopped.is_set():
+                    break
+                options = {**base, 'source': source}
+                # Stable per-source workspaces allow resume and avoid mixing folders.
+                if len(sources) > 1:
+                    suffix = hashlib.sha256(str(Path(source).resolve()).casefold().encode()).hexdigest()[:12]
+                    options['output'] = str(Path(base['output']) / f'{Path(source).name}_{suffix}')
+                self.progress.emit({'message': f'文件夹 {index + 1}/{len(sources)}：{source}'})
+                try:
+                    results.append({'source': source, **self._run_one(options)})
+                except Exception as exc:
+                    errors.append({'source': source, 'error': f'{type(exc).__name__}: {exc}'})
+                    self.progress.emit({'message': f'文件夹失败：{source}：{exc}'})
+            result = {'batch': True, 'results': results, 'errors': errors,
+                      'stopped': self.control.stopped.is_set()}
             if self.scan_only:
-                files = scan(self.options["source"], face=self.options["face"])
-                total_bytes = sum(Path(p).stat().st_size for p in files)
-                self.result.emit({"scan": True, "count": len(files), "bytes": total_bytes})
-            else:
-                result = run(**self.options, control=self.control, on_progress=self.progress.emit)
-                self.result.emit(result)
+                result.update(scan=True, count=sum(r['count'] for r in results),
+                              bytes=sum(r['bytes'] for r in results))
+            self.result.emit(result)
         except Exception as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
+
+    def _run_one(self, options):
+        if self.environment_name:
+            from .field_dataset_runtime import run_in_environment
+            return run_in_environment(options, self.environment_name, self.control,
+                                      self.progress.emit, self.scan_only)
+        from .field_dataset import run, scan
+        if self.scan_only:
+            files = scan(options['source'], face=options['face'])
+            return {'scan': True, 'count': len(files), 'bytes': sum(Path(p).stat().st_size for p in files)}
+        return run(**options, control=self.control, on_progress=self.progress.emit)
 
 
 class FieldDatasetPage(QWidget):
@@ -75,9 +112,18 @@ class FieldDatasetPage(QWidget):
 
         self.settings = QGroupBox("输入与生成设置")
         form = QFormLayout(self.settings)
-        self.source = QLineEdit()
+        self.source = QPlainTextEdit()
+        self.source.setPlaceholderText('每行一个原图文件夹；可多选添加，也可粘贴多个路径')
+        self.source.setMaximumHeight(95)
         self.output = QLineEdit()
-        form.addRow("原图文件夹", self._folder_row(self.source))
+        source_row = QWidget()
+        source_layout = QHBoxLayout(source_row)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.addWidget(self.source)
+        add_sources = QPushButton('添加文件夹（多选）…')
+        add_sources.clicked.connect(self._browse_sources)
+        source_layout.addWidget(add_sources)
+        form.addRow("原图文件夹列表", source_row)
         form.addRow("输出文件夹", self._folder_row(self.output))
         self.environment = QComboBox()
         self.environment.setEditable(True)
@@ -91,8 +137,7 @@ class FieldDatasetPage(QWidget):
         refresh_environments.clicked.connect(self._load_environments)
         environment_layout.addWidget(refresh_environments)
         form.addRow('执行 Conda 环境', environment_row)
-        self.product = QComboBox()
-        self.product.addItems(["D01-R", "D01-L"])
+        self.product = QLabel('款号由配置文件读取')
         self.face = QComboBox()
         for label, value in [("全部", "all"), ("Top", "top"), ("Bottom", "bottom")]:
             self.face.addItem(label, value)
@@ -103,9 +148,10 @@ class FieldDatasetPage(QWidget):
         self.limit.setRange(0, 10000000)
         self.limit.setSpecialValueText("全部图片")
         self.limit.setToolTip("设置少量图片进行试运行；0 表示全部。按扫描顺序取样。")
-        form.addRow("产品配置", self.product)
+        form.addRow("配置款号", self.product)
         self.product_config = QLineEdit()
-        self.product_config.setPlaceholderText('留空：读取所选产品的 .yaml（不带 .local）')
+        self.product_config.setPlaceholderText('请选择 YAML；自动读取 inspection.product，无需手选款号')
+        self.product_config.textChanged.connect(self._update_config_product)
         self.product_config.setToolTip('可指定任意 YAML，包括 .local.yaml；不与默认文件合并。相对模板路径仍遵循 Cosmos 原有规则。')
         config_row = QWidget()
         config_layout = QHBoxLayout(config_row)
@@ -117,7 +163,7 @@ class FieldDatasetPage(QWidget):
         form.addRow('产品配置文件', config_row)
         form.addRow("正反面", self.face)
         form.addRow("生成方式", self.mode)
-        form.addRow("本次最多处理", self.limit)
+        form.addRow("每个文件夹最多处理", self.limit)
         layout.addWidget(self.settings)
 
         self.models_group = QGroupBox("选择要导出的模型数据集")
@@ -194,6 +240,23 @@ class FieldDatasetPage(QWidget):
         layout.addWidget(self.tabs, 2)
         self._set_busy(False)
 
+    def _update_config_product(self):
+        try:
+            self.product.setText(configured_product(self.product_config.text().strip()))
+        except Exception:
+            self.product.setText('请选择有效配置（inspection.product）')
+
+    def _browse_sources(self):
+        dialog = QFileDialog(self, '选择多个原图文件夹（Ctrl / Shift 多选）')
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        for view in dialog.findChildren(QTreeView) + dialog.findChildren(QListView):
+            view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        if dialog.exec():
+            paths = self.source.toPlainText().splitlines() + dialog.selectedFiles()
+            self.source.setPlainText('\n'.join(dict.fromkeys(p.strip() for p in paths if p.strip())))
+
     def _browse_product_config(self):
         from .paths import COSMOS_ROOT
         path, _ = QFileDialog.getOpenFileName(self, '选择产品配置',
@@ -234,30 +297,33 @@ class FieldDatasetPage(QWidget):
     def _load_previews(self):
         self.sample_list.clear()
         root = Path(self.output.text().strip()).resolve()
-        database = root / "run.db"
-        if not database.is_file():
+        databases = ([root / 'run.db'] if (root / 'run.db').is_file() else []) + sorted(root.glob('*/run.db'))
+        if not databases:
             self.sample_image.setText("输出目录尚无 run.db，请先生成数据。")
             return
         try:
-            connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
-            try:
-                rows = connection.execute("SELECT model,details FROM items WHERE status='complete' ORDER BY model,key")
-                count = 0
-                for model, details in rows:
-                    for record in json.loads(details):
-                        directory = Path(record["directory"]).resolve()
-                        if root not in directory.parents:
-                            continue
-                        item = QListWidgetItem(f"{model}\n{Path(record.get('source', '')).name} / {directory.name}")
-                        item.setData(Qt.ItemDataRole.UserRole, str(directory))
-                        self.sample_list.addItem(item)
-                        count += 1
+            count = 0
+            for database in databases:
+                connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+                try:
+                    rows = connection.execute("SELECT model,details FROM items WHERE status='complete' ORDER BY model,key")
+                    for model, details in rows:
+                        for record in json.loads(details):
+                            directory = Path(record["directory"]).resolve()
+                            if root not in directory.parents:
+                                continue
+                            item = QListWidgetItem(f"{model}\n{Path(record.get('source', '')).name} / {directory.name}")
+                            item.setData(Qt.ItemDataRole.UserRole, str(directory))
+                            self.sample_list.addItem(item)
+                            count += 1
+                            if count >= 500:
+                                break
                         if count >= 500:
                             break
-                    if count >= 500:
-                        break
-            finally:
-                connection.close()
+                finally:
+                    connection.close()
+                if count >= 500:
+                    break
             self.tabs.setCurrentIndex(1)
             if self.sample_list.count():
                 self.sample_list.setCurrentRow(0)
@@ -328,10 +394,11 @@ class FieldDatasetPage(QWidget):
     def _start(self, scan_only=False):
         if self.worker and self.worker.isRunning():
             return
-        source = self.source.text().strip()
+        sources = list(dict.fromkeys(str(Path(p.strip().strip('"')).resolve())
+                                     for p in self.source.toPlainText().splitlines() if p.strip()))
         output = self.output.text().strip()
         selected = [key for key, check in self.checks.items() if check.isChecked()]
-        if not source or not Path(source).is_dir():
+        if not sources or any(not Path(p).is_dir() for p in sources):
             QMessageBox.warning(self, "输入目录", "请选择存在的原图文件夹。")
             return
         if not scan_only and (not output or not selected):
@@ -339,7 +406,18 @@ class FieldDatasetPage(QWidget):
             return
         self.control.paused.clear()
         self.control.stopped.clear()
-        options = dict(source=source, output=output, product=self.product.currentText(), selected=selected,
+        config_path = self.product_config.text().strip()
+        try:
+            product = configured_product(config_path)
+        except Exception as exc:
+            QMessageBox.warning(self, '产品配置', f'请选择有效的产品配置文件：{exc}')
+            return
+        if output:
+            target = Path(output).resolve()
+            if any(target == Path(p) or target in Path(p).parents or Path(p) in target.parents for p in sources):
+                QMessageBox.warning(self, '输出目录', '输入与输出目录不能互相包含。')
+                return
+        options = dict(sources=sources, output=output, product=product, selected=selected,
                        face=self.face.currentData(), mode=self.mode.currentData(), limit=self.limit.value() or None)
         config_path = self.product_config.text().strip()
         if config_path:
@@ -413,6 +491,8 @@ class FieldDatasetPage(QWidget):
                 self.status.setText(f"数据集已生成：{training}（datasets 为中间目录，无需用于训练）")
             self.progress_bar.setValue(0 if self.control.stopped.is_set() else 100)
         self.log.appendPlainText(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        if result.get('batch') and not result.get('scan'):
+            self.status.setText(f"{'已停止' if result.get('stopped') else '批量处理结束'}：完成 {len(result['results'])} 个文件夹，失败 {len(result['errors'])} 个；详见日志。")
 
     def _on_error(self, message):
         self.progress_bar.setRange(0, 100)
