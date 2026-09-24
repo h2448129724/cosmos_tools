@@ -124,6 +124,7 @@ def _page_factory_for(factory_key: str):
         "overview": lambda runtime, parent: ProjectOverviewPage(runtime, parent),
         "cabf_config": _create_cabf_config_activity,
         "cabf_field_dataset": _create_field_dataset_activity,
+        "db_ng_export": _create_db_ng_export_activity,
         "database": _create_database_activity,
         "cosmos_pipeline": _create_cosmos_pipeline_activity,
         "sew_point_connect": lambda runtime, parent: SewPointConnectActivity(
@@ -254,6 +255,14 @@ def _create_database_activity(runtime, parent):
     from .database_ui import DatabasePage
 
     page = DatabasePage(parent)
+    page.protect_window_close(runtime.window)
+    return page
+
+
+def _create_db_ng_export_activity(runtime, parent):
+    from .db_ng_ui import DbNgPage
+
+    page = DbNgPage(parent)
     page.protect_window_close(runtime.window)
     return page
 

@@ -292,6 +292,15 @@ def plan_default_capabilities(
                 keywords=("CAB-F", "数据集", "现场", "批量", "ONNX", "裁片"),
             ),
             _page(
+                "cabf.db_ng_export",
+                "数据库 NG 图片提取",
+                "只读筛选数据库 NG 产品记录，预览并复制关联原图或结果图，支持暂停续跑。",
+                ActivityStage.DATA,
+                page_factory_key="db_ng_export",
+                order=2,
+                keywords=("数据库", "NG", "原图", "复制", "日志"),
+            ),
+            _page(
                 "cabf.config_studio",
                 "CAB-F 基准图与模板生成",
                 "从 TOP/BOTTOM 初始原图生成全尺寸校准基准图与匹配模板，并在校准坐标系中编辑 ROI。",
