@@ -283,6 +283,15 @@ def plan_default_capabilities(
     planned.extend(
         (
             _page(
+                "images.png_compress",
+                "图片压缩 · PNG / JPG",
+                "PNG 无损原地压缩或转 JPG 有损压缩，校验后可选删除源 PNG。",
+                ActivityStage.DATA,
+                page_factory_key="png_compress",
+                order=3,
+                keywords=("PNG", "JPG", "JPEG", "压缩", "存储", "无损", "有损", "原地"),
+            ),
+            _page(
                 "cabf.field_dataset",
                 "CAB-F 现场数据集生成",
                 "独立勾选模型，从现场原图生成裁片、伪标签和复核数据，支持暂停续跑。",

@@ -125,6 +125,7 @@ def _page_factory_for(factory_key: str):
         "cabf_config": _create_cabf_config_activity,
         "cabf_field_dataset": _create_field_dataset_activity,
         "db_ng_export": _create_db_ng_export_activity,
+        "png_compress": _create_png_compress_activity,
         "database": _create_database_activity,
         "cosmos_pipeline": _create_cosmos_pipeline_activity,
         "sew_point_connect": lambda runtime, parent: SewPointConnectActivity(
@@ -141,6 +142,15 @@ def _page_factory_for(factory_key: str):
         return factories[factory_key]
     except KeyError as exc:
         raise KeyError(f"Unknown page factory key: {factory_key}") from exc
+
+
+def _create_png_compress_activity(runtime, parent):
+    from .png_compress_ui import PngCompressPage
+
+    page = PngCompressPage(parent)
+    page.task_center = getattr(runtime, 'task_center', None)
+    page.protect_window_close(runtime.window)
+    return page
 
 
 def _activation_for(plan: ActivationPlan | None):
