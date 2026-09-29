@@ -263,6 +263,8 @@ def _create_db_ng_export_activity(runtime, parent):
     from .db_ng_ui import DbNgPage
 
     page = DbNgPage(parent)
+    page.task_center = getattr(runtime, 'task_center', None)
+    page.project_session = getattr(runtime, 'project_session', None)
     page.protect_window_close(runtime.window)
     return page
 
@@ -271,8 +273,10 @@ def _create_field_dataset_activity(runtime, parent):
     from .field_dataset_ui import FieldDatasetPage
 
     page = FieldDatasetPage(parent)
+    page.task_center = getattr(runtime, 'task_center', None)
+    page.project_session = getattr(runtime, 'project_session', None)
     state = runtime.project_context.state
-    page.source.setText(state.image_dir or state.dataset_root or "")
+    page.source.setPlainText(state.image_dir or state.dataset_root or "")
     if state.output_root:
         page.output.setText(state.output_root)
     page.protect_window_close(runtime.window)

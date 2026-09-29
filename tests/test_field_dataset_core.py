@@ -56,10 +56,95 @@ def test_stop_before_decode(tmp_path, fake_models):
     assert result['stopped'] and fake_models.calls == 0
 
 
+def test_export_excludes_previous_version_and_other_source(tmp_path, fake_models):
+    source = source_image(tmp_path)
+    output = tmp_path / 'output'
+    args = dict(source=source, output=output, product='D01-R', selected=['roi_detector'])
+    first = core.run(**args)
+    fake_models.snapshot = {'model': 'fixture-v2'}
+    second = core.run(**args)
+    assert second['completed_model_jobs'] == 1
+    assert second['export']['samples'] == 1
+    assert second['total_model_jobs'] == 1
+    assert second['export']['run_id'] == second['run_id']
+    assert first['run_id'] != second['run_id']
+    resumed = core.run(**args)
+    assert resumed['skipped_model_jobs'] == 1
+    assert resumed['export']['samples'] == 1
+    other = tmp_path / 'other'
+    other.mkdir()
+    cv2.imwrite(str(other / 'another_top.png'), np.zeros((12, 12, 3), np.uint8))
+    last = core.run(**{**args, 'source': other})
+    assert last['export']['samples'] == 1
+    from cosmos_toolbox.field_dataset_export import export
+    assert export(output, scope='history')['samples'] == 3
+
+
+def test_ng_filter_isolated_resume_and_only_saves_ng(tmp_path, fake_models, monkeypatch):
+    class Gate:
+        def __init__(self, models):
+            pass
+        def evaluate(self, image, face, selected):
+            return {m: {'save': m == 'roi_detector', 'reason': 'NG' if m == 'roi_detector' else 'OK',
+                        'checks': []} for m in selected}
+        def close(self):
+            pass
+    monkeypatch.setattr('cosmos_toolbox.field_dataset_ng.NGGate', Gate)
+    source = source_image(tmp_path)
+    output = tmp_path / 'output'
+    args = dict(source=source, output=output, product='D01-R', selected=['roi_detector', 'tail_roi_detector'])
+    result = core.run(**args, ng_only=True)
+    assert result['completed_model_jobs'] == 1
+    assert result['filtered_model_jobs'] == 1
+    annotation = next((output / 'ng_only/datasets/roi_detector').rglob('image.json'))
+    assert json.loads(annotation.read_text(encoding='utf-8'))['field_metadata']['ng_filter']['reason'] == 'NG'
+    assert not (output / 'ng_only/datasets/tail_roi_detector').exists()
+    assert json.loads((output / 'ng_only/filtered.json').read_text(encoding='utf-8'))[0]['reason'] == 'OK'
+    assert core.run(**args, ng_only=True)['skipped_model_jobs'] == 2
+    assert core.run(**args)['completed_model_jobs'] == 2
+
+
 def test_reject_nested_output(tmp_path, fake_models):
     source = source_image(tmp_path)
     with pytest.raises(ValueError):
         core.run(source, source / 'out', 'D01-R', ['roi_detector'])
+
+
+def test_unconfigured_checks_skip_but_missing_enabled_checks_fail(tmp_path, fake_models, monkeypatch):
+    class Gate:
+        def __init__(self, models):
+            pass
+        def evaluate(self, image, face, selected):
+            return {name: {'save': False, 'reason': 'not_executed',
+                           'checks': [] if name == 'hook_detector' else [{'state': 'not_executed'}]}
+                    for name in selected}
+        def close(self):
+            pass
+    monkeypatch.setattr('cosmos_toolbox.field_dataset_ng.NGGate', Gate)
+    args = dict(source=source_image(tmp_path), output=tmp_path / 'out', product='D01-R',
+                selected=['hook_detector', 'roi_detector'], ng_only=True)
+    first = core.run(**args)
+    assert first['not_applicable_model_jobs'] == 1
+    assert first['failed_model_jobs'] == 1
+    assert first['models']['hook_detector']['not_applicable'] == 1
+    assert len(json.loads((tmp_path / 'out/ng_only/not_applicable.json').read_text(encoding='utf-8'))) == 1
+    second = core.run(**args)
+    assert second['skipped_model_jobs'] == 1
+    assert second['failed_model_jobs'] == 1
+
+
+def test_missing_roi_is_review_and_retried_without_fake_crops(tmp_path, fake_models, monkeypatch):
+    def generate(self, image, selected, **kwargs):
+        self.review_reasons = {'roi_detector': 'No ROI'}
+        return {}
+    monkeypatch.setattr(fake_models, 'generate', generate)
+    args = dict(source=source_image(tmp_path), output=tmp_path / 'out', product='D01-R', selected=['roi_detector'])
+    for _ in range(2):
+        result = core.run(**args)
+        assert result['review_model_jobs'] == 1
+        assert result['failed_model_jobs'] == result['skipped_model_jobs'] == 0
+    assert not list((tmp_path / 'out/datasets').rglob('image.png'))
+    assert json.loads((tmp_path / 'out/review.json').read_text(encoding='utf-8'))[0]['reason'] == 'missing_roi'
 
 
 def test_invalid_coordinates_never_commit(tmp_path, fake_models, monkeypatch):

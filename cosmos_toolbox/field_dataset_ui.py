@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
-    QListWidget, QListWidgetItem, QTabWidget, QTreeView, QListView, QAbstractItemView,
+    QListWidget, QListWidgetItem, QTabWidget, QTreeView, QListView, QAbstractItemView, QSizePolicy,
+    QTableWidget, QTableWidgetItem, QHeaderView,
 )
 
 from .paths import ensure_import_paths
@@ -110,11 +111,19 @@ class FieldDatasetPage(QWidget):
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
 
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+
         self.settings = QGroupBox("输入与生成设置")
         form = QFormLayout(self.settings)
+        form.setVerticalSpacing(12)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.source = QPlainTextEdit()
         self.source.setPlaceholderText('每行一个原图文件夹；可多选添加，也可粘贴多个路径')
-        self.source.setMaximumHeight(95)
+        self.source.setMinimumHeight(85)
+        self.source.setMaximumHeight(110)
         self.output = QLineEdit()
         source_row = QWidget()
         source_layout = QHBoxLayout(source_row)
@@ -132,7 +141,7 @@ class FieldDatasetPage(QWidget):
         environment_row = QWidget()
         environment_layout = QHBoxLayout(environment_row)
         environment_layout.setContentsMargins(0, 0, 0, 0)
-        environment_layout.addWidget(self.environment)
+        environment_layout.addWidget(self.environment, 1)
         refresh_environments = QPushButton('加载环境列表')
         refresh_environments.clicked.connect(self._load_environments)
         environment_layout.addWidget(refresh_environments)
@@ -163,8 +172,24 @@ class FieldDatasetPage(QWidget):
         form.addRow('产品配置文件', config_row)
         form.addRow("正反面", self.face)
         form.addRow("生成方式", self.mode)
+        self.ng_only = QCheckBox('仅保存对应检查项为 NG 的数据')
+        self.ng_only.setToolTip('默认关闭。使用配置中的正式检查判定；共用模型任一关联检查项 NG 即保存。异常、未执行不视为 NG。会增加检查耗时。')
+        form.addRow('保存条件', self.ng_only)
+        self.export_scope = QComboBox()
+        self.export_scope.addItem('仅本次运行范围（推荐，含断点复用）', 'current')
+        self.export_scope.addItem('全部历史结果（可能含旧版标签）', 'history')
+        self.export_scope.setToolTip('历史模式会包含同一输出账本中不同来源和不同版本的数据；不会自动去重。')
+        form.addRow('导出范围', self.export_scope)
         form.addRow("每个文件夹最多处理", self.limit)
-        layout.addWidget(self.settings)
+        # Scroll the form instead of squeezing rows below their styled size hints.
+        settings_content = QWidget()
+        settings_layout = QVBoxLayout(settings_content)
+        settings_layout.addWidget(self.settings)
+        settings_layout.addStretch()
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setWidget(settings_content)
+        self.tabs.addTab(self.settings_scroll, "输入设置")
 
         self.models_group = QGroupBox("选择要导出的模型数据集")
         models_layout = QVBoxLayout(self.models_group)
@@ -175,33 +200,39 @@ class FieldDatasetPage(QWidget):
             shortcuts.addWidget(button)
         models_layout.addLayout(shortcuts)
         container = QWidget()
-        grid = QGridLayout(container)
+        self.model_grid = QGridLayout(container)
+        self.model_grid.setVerticalSpacing(14)
+        self.model_grid.setHorizontalSpacing(24)
         self.checks = {}
         for index, (model_id, label) in enumerate(MODEL_IDS.items()):
             check = QCheckBox(f"{label}\n{model_id}")
+            check.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             check.setToolTip("仅导出勾选项；必要的前置定位模型由执行器自动补齐。")
             self.checks[model_id] = check
             check.toggled.connect(self._update_dependencies)
-            grid.addWidget(check, index // 2, index % 2)
+            self.model_grid.addWidget(check, index // 2, index % 2)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(container)
         scroll.setMinimumHeight(180)
+        self.model_scroll = scroll
+        self.model_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         models_layout.addWidget(scroll)
         self.dependencies = QLabel("自动依赖：无")
         self.dependencies.setWordWrap(True)
         models_layout.addWidget(self.dependencies)
-        layout.addWidget(self.models_group, 2)
+        self.tabs.addTab(self.models_group, "模型选择（0）")
 
-        actions = QHBoxLayout()
+        actions = QGridLayout()
         self.scan_button = QPushButton("扫描图片")
         self.start_button = QPushButton("开始生成")
         self.preview_button = QPushButton("试跑前 2 张")
         self.pause_button = QPushButton("暂停")
         self.stop_button = QPushButton("安全停止")
         self.open_button = QPushButton("打开输出目录")
-        for button in (self.scan_button, self.preview_button, self.start_button, self.pause_button, self.stop_button, self.open_button):
-            actions.addWidget(button)
+        for index, button in enumerate((self.scan_button, self.preview_button, self.start_button, self.pause_button, self.stop_button, self.open_button)):
+            actions.addWidget(button, index // 3, index % 3)
+        self.start_button.setProperty('buttonRole', 'primary')
         layout.addLayout(actions)
         self.scan_button.clicked.connect(lambda: self._start(scan_only=True))
         self.start_button.clicked.connect(lambda: self._start())
@@ -217,7 +248,6 @@ class FieldDatasetPage(QWidget):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
-        self.tabs = QTabWidget()
         self.tabs.addTab(self.log, "运行日志")
         preview = QWidget()
         preview_layout = QVBoxLayout(preview)
@@ -236,9 +266,33 @@ class FieldDatasetPage(QWidget):
         preview_scroll.setWidget(self.sample_image)
         preview_row.addWidget(preview_scroll, 1)
         preview_layout.addLayout(preview_row)
+        self.preview_page = preview
         self.tabs.addTab(preview, "样本预览")
-        layout.addWidget(self.tabs, 2)
+        result_page = QWidget()
+        result_layout = QVBoxLayout(result_page)
+        result_hint = QLabel('以下仅汇总本次运行范围（含有效断点复用），不混入其他历史版本。未启用不算失败，需复核不自动作为负样本。')
+        result_hint.setWordWrap(True)
+        result_layout.addWidget(result_hint)
+        self.result_table = QTableWidget(0, 7)
+        self.result_table.setHorizontalHeaderLabels(['模型', '完成任务', 'OK 过滤', '未启用', '需复核', '技术失败', '裁片数'])
+        self.result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        result_layout.addWidget(self.result_table)
+        self.result_page = result_page
+        self.tabs.addTab(result_page, '结果汇总')
         self._set_busy(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, 'model_grid'):
+            return
+        # Keep long model identifiers readable in the toolbox's narrow content area.
+        cell_width = max(check.sizeHint().width() for check in self.checks.values())
+        columns = 2 if self.width() >= 2 * cell_width + 90 else 1
+        for check in self.checks.values():
+            self.model_grid.removeWidget(check)
+        for index, check in enumerate(self.checks.values()):
+            self.model_grid.addWidget(check, index // columns, index % columns)
 
     def _update_config_product(self):
         try:
@@ -278,6 +332,7 @@ class FieldDatasetPage(QWidget):
     def _update_dependencies(self):
         from .field_dataset import MODEL_DEPENDENCIES, MODEL_IDS
         selected = {key for key, check in self.checks.items() if check.isChecked()}
+        self.tabs.setTabText(self.tabs.indexOf(self.models_group), f"模型选择（{len(selected)}）")
         required = set()
         pending = list(selected)
         while pending:
@@ -297,7 +352,7 @@ class FieldDatasetPage(QWidget):
     def _load_previews(self):
         self.sample_list.clear()
         root = Path(self.output.text().strip()).resolve()
-        databases = ([root / 'run.db'] if (root / 'run.db').is_file() else []) + sorted(root.glob('*/run.db'))
+        databases = ([root / 'run.db'] if (root / 'run.db').is_file() else []) + sorted(root.glob('*/run.db')) + sorted(root.glob('*/ng_only/run.db'))
         if not databases:
             self.sample_image.setText("输出目录尚无 run.db，请先生成数据。")
             return
@@ -306,7 +361,14 @@ class FieldDatasetPage(QWidget):
             for database in databases:
                 connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
                 try:
-                    rows = connection.execute("SELECT model,details FROM items WHERE status='complete' ORDER BY model,key")
+                    runs = sorted((database.parent / 'runs').glob('*.json'))
+                    run_id = json.loads(runs[-1].read_text(encoding='utf-8')).get('run_id') if runs else None
+                    if run_id:
+                        rows = connection.execute("SELECT model,details FROM items JOIN run_items ON item_key=key "
+                            "WHERE status='complete' AND run_id=? ORDER BY model,key", (run_id,))
+                    else:
+                        self.log.appendPlainText(f'旧账本预览（历史结果，尚无运行范围）：{database}')
+                        rows = connection.execute("SELECT model,details FROM items WHERE status='complete' ORDER BY model,key")
                     for model, details in rows:
                         for record in json.loads(details):
                             directory = Path(record["directory"]).resolve()
@@ -324,7 +386,7 @@ class FieldDatasetPage(QWidget):
                     connection.close()
                 if count >= 500:
                     break
-            self.tabs.setCurrentIndex(1)
+            self.tabs.setCurrentWidget(self.preview_page)
             if self.sample_list.count():
                 self.sample_list.setCurrentRow(0)
             else:
@@ -418,7 +480,8 @@ class FieldDatasetPage(QWidget):
                 QMessageBox.warning(self, '输出目录', '输入与输出目录不能互相包含。')
                 return
         options = dict(sources=sources, output=output, product=product, selected=selected,
-                       face=self.face.currentData(), mode=self.mode.currentData(), limit=self.limit.value() or None)
+                       face=self.face.currentData(), mode=self.mode.currentData(), limit=self.limit.value() or None,
+                       ng_only=self.ng_only.isChecked(), export_scope=self.export_scope.currentData())
         config_path = self.product_config.text().strip()
         if config_path:
             if not Path(config_path).is_file():
@@ -438,6 +501,9 @@ class FieldDatasetPage(QWidget):
         self.progress_bar.setRange(0, 0)
         self.status.setText("正在扫描图片…" if scan_only else "正在准备模型与输出…")
         self.log.appendPlainText(self.status.text())
+        self.tabs.setCurrentWidget(self.log)
+        from .worker_task_bridge import bind_worker_task
+        bind_worker_task(self, '现场数据集：扫描' if scan_only else '现场数据集：生成', 'cabf.field_dataset')
         self.worker.start()
 
     def _set_busy(self, busy, scan_only=False):
@@ -459,8 +525,13 @@ class FieldDatasetPage(QWidget):
             self.control.paused.set()
             self.pause_button.setText("继续")
             self.status.setText("已请求暂停，将在安全处理点等待。")
+        if getattr(self, '_task_bridge', None):
+            self._task_bridge.note(self.status.text())
 
     def _stop(self):
+        bridge = getattr(self, '_task_bridge', None)
+        if bridge and bridge.center.cancel(bridge.task_id):
+            return
         self.control.stopped.set()
         self.control.paused.clear()
         self.pause_button.setEnabled(False)
@@ -473,7 +544,13 @@ class FieldDatasetPage(QWidget):
         if isinstance(total, int) and total > 0 and isinstance(done, int):
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(done)
-        message = data.get("message") or json.dumps(data, ensure_ascii=False, default=str)
+        message = data.get("message")
+        if not message and 'completed' in data:
+            message = (f"原图 {done}/{total}；模型任务：完成 {data.get('completed', 0)}，"
+                       f"OK 过滤 {data.get('filtered', 0)}，未启用 {data.get('not_applicable', 0)}，"
+                       f"需复核 {data.get('review', 0)}，技术失败 {data.get('failed', 0)}，"
+                       f"断点跳过 {data.get('skipped', 0)}")
+        message = message or json.dumps(data, ensure_ascii=False, default=str)
         self.log.appendPlainText(str(message))
         if not self.control.paused.is_set() and not self.control.stopped.is_set():
             self.status.setText(str(message))
@@ -491,8 +568,29 @@ class FieldDatasetPage(QWidget):
                 self.status.setText(f"数据集已生成：{training}（datasets 为中间目录，无需用于训练）")
             self.progress_bar.setValue(0 if self.control.stopped.is_set() else 100)
         self.log.appendPlainText(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-        if result.get('batch') and not result.get('scan'):
-            self.status.setText(f"{'已停止' if result.get('stopped') else '批量处理结束'}：完成 {len(result['results'])} 个文件夹，失败 {len(result['errors'])} 个；详见日志。")
+        if not result.get('scan'):
+            runs = result.get('results', []) if result.get('batch') else [result]
+            total = lambda key: sum(run.get(key, 0) for run in runs)
+            failures = total('failed_model_jobs')
+            folder_errors = len(result.get('errors', [])) if result.get('batch') else 0
+            title = '已停止' if result.get('stopped') or self.control.stopped.is_set() else (
+                '处理结束（有技术失败）' if failures or folder_errors else '处理结束')
+            self.status.setText(
+                f"{title}：本次模型任务完成 {total('completed_model_jobs')}，OK 过滤 {total('filtered_model_jobs')}，"
+                f"未启用 {total('not_applicable_model_jobs')}，需复核 {total('review_model_jobs')}，"
+                f"技术失败 {failures}，断点跳过 {total('skipped_model_jobs')}；文件夹异常 {folder_errors}。")
+            merged = {}
+            for run in runs:
+                for name, counts in run.get('models', {}).items():
+                    row = merged.setdefault(name, {})
+                    for key in ('complete', 'filtered', 'not_applicable', 'review', 'failed', 'samples'):
+                        row[key] = row.get(key, 0) + counts.get(key, 0)
+            self.result_table.setRowCount(len(merged))
+            for index, (name, counts) in enumerate(sorted(merged.items())):
+                values = [name, *[counts[key] for key in ('complete', 'filtered', 'not_applicable', 'review', 'failed', 'samples')]]
+                for column, value in enumerate(values):
+                    self.result_table.setItem(index, column, QTableWidgetItem(str(value)))
+            self.tabs.setCurrentWidget(self.result_page)
 
     def _on_error(self, message):
         self.progress_bar.setRange(0, 100)
@@ -503,7 +601,10 @@ class FieldDatasetPage(QWidget):
         self._set_busy(False)
         self.pause_button.setText("暂停")
         if self.worker and not self.worker.scan_only:
+            current_tab = self.tabs.currentWidget()
             self._load_previews()
+            if current_tab is self.result_page:
+                self.tabs.setCurrentWidget(current_tab)
 
     def _open_output(self):
         value = self.output.text().strip()

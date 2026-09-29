@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 
 from .paths import COSMOS_ROOT
@@ -102,8 +103,14 @@ class DbNgPage(QWidget):
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
 
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+
         self.settings = QGroupBox("输入与筛选")
         form = QFormLayout(self.settings)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setVerticalSpacing(10)
 
         self.database = QLineEdit(str(COSMOS_ROOT / "cosmos.db"))
         self.database_path = self.database
@@ -152,17 +159,25 @@ class DbNgPage(QWidget):
         kinds_layout.addWidget(self.result)
         kinds_layout.addStretch(1)
         form.addRow("图片类型", kinds_widget)
-        layout.addWidget(self.settings)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.addWidget(self.settings)
+        content_layout.addStretch()
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setWidget(content)
+        self.tabs.addTab(self.settings_scroll, '输入与筛选')
 
-        actions = QHBoxLayout()
+        from .ui.primitives import ActionBar
+        actions = ActionBar()
         self.scan_button = QPushButton("扫描预览")
         self.copy_button = QPushButton("按计划复制")
         self.pause_button = QPushButton("暂停")
         self.stop_button = QPushButton("停止")
         self.open_button = QPushButton("打开输出目录")
         for button in (self.scan_button, self.copy_button, self.pause_button, self.stop_button, self.open_button):
-            actions.addWidget(button)
-        layout.addLayout(actions)
+            actions.add_widget(button)
+        layout.addWidget(actions)
         self.scan_button.clicked.connect(self.scan)
         self.copy_button.clicked.connect(self.copy)
         self.pause_button.clicked.connect(self._toggle_pause)
@@ -180,8 +195,13 @@ class DbNgPage(QWidget):
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setPlaceholderText("扫描计划、缺失路径和复制结果会显示在这里。")
-        self.preview.setMinimumHeight(220)
-        layout.addWidget(self.preview, 1)
+        self.preview.setMaximumBlockCount(2000)
+        self.tabs.addTab(self.preview, '计划与日志')
+        self.files_table = QTableWidget(0, 3)
+        self.files_table.setHorizontalHeaderLabels(['状态', '原图路径', '容量'])
+        self.files_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.files_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tabs.addTab(self.files_table, '文件清单')
         self.scan_preview = self.preview
         self.log = self.preview
 
@@ -303,6 +323,8 @@ class DbNgPage(QWidget):
         self.progress_bar.setRange(0, 0)
         self.status.setText("正在只读扫描数据库…")
         self.preview.clear()
+        from .worker_task_bridge import bind_worker_task
+        bind_worker_task(self, '数据库 NG：扫描', 'cabf.db_ng_export')
         self.worker.start()
 
     # Small method aliases make this page convenient for shell adapters and
@@ -331,6 +353,8 @@ class DbNgPage(QWidget):
         self._set_busy(True, scan_only=False)
         self.progress_bar.setRange(0, 0)
         self.status.setText("正在复制计划中的图片…")
+        from .worker_task_bridge import bind_worker_task
+        bind_worker_task(self, '数据库 NG：复制', 'cabf.db_ng_export')
         self.worker.start()
 
     def _start_copy(self):
@@ -342,6 +366,15 @@ class DbNgPage(QWidget):
         summary = plan.get("summary", {}) if isinstance(plan, dict) else {}
         self.status.setText(self._summary_text(summary, scanned=True))
         self.preview.setPlainText(self._plan_text(plan))
+        files = plan.get('files', [])
+        self.files_table.setRowCount(len(files))
+        for row, item in enumerate(files):
+            for column, value in enumerate((item.get('status', ''), item.get('source', ''),
+                                             self._format_bytes(item.get('size', 0)))):
+                cell = QTableWidgetItem(str(value))
+                cell.setToolTip(str(value))
+                self.files_table.setItem(row, column, cell)
+        self.tabs.setCurrentWidget(self.files_table)
         self._update_copy_enabled()
 
     def _on_copy_result(self, report):
@@ -416,6 +449,7 @@ class DbNgPage(QWidget):
         self.progress_bar.setRange(0, 100)
         self.status.setText("任务异常，请查看详情。")
         self.preview.appendPlainText("错误：" + str(message))
+        self.tabs.setCurrentWidget(self.preview)
 
     def _set_busy(self, busy, scan_only=False):
         self.settings.setEnabled(not busy)
@@ -445,8 +479,13 @@ class DbNgPage(QWidget):
             self.control.paused.set()
             self.pause_button.setText("继续")
             self.status.setText("已请求暂停，将在安全处理点等待。")
+        if getattr(self, '_task_bridge', None):
+            self._task_bridge.note(self.status.text())
 
     def _stop(self):
+        bridge = getattr(self, '_task_bridge', None)
+        if bridge and bridge.center.cancel(bridge.task_id):
+            return
         self.control.stopped.set()
         self.control.paused.clear()
         self.pause_button.setEnabled(False)

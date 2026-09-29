@@ -102,7 +102,7 @@ def flatten_snapshot(snapshot, destination=None):
     return report
 
 
-def export(output, models=None, *, xany_only=True, source=None):
+def export(output, models=None, *, xany_only=True, source=None, run_id=None, scope='current'):
     """Export a fresh snapshot; never overwrite earlier exports or source annotations.
 
     The returned report describes structural validation, not annotation accuracy.
@@ -112,6 +112,20 @@ def export(output, models=None, *, xany_only=True, source=None):
     database = output / 'run.db'
     if not database.is_file():
         raise ValueError('run.db does not exist')
+    if scope not in {'current', 'history'}:
+        raise ValueError('export scope must be current or history')
+    if run_id is not None and scope == 'history':
+        raise ValueError('run_id cannot be combined with history scope')
+    if scope == 'current' and run_id is None:
+        candidates = []
+        for path in sorted((output / 'runs').glob('*.json')):
+            fact = json.loads(path.read_text(encoding='utf-8'))
+            if source is None or Path(fact.get('source', '')).resolve() == Path(source).resolve():
+                candidates.append(fact)
+        if candidates:
+            run_id = candidates[-1].get('run_id')
+        if not run_id:
+            raise ValueError('旧账本没有运行范围记录；请重新生成，或显式指定 scope=history 导出历史数据')
     if source is None:
         runs = sorted((output / 'runs').glob('*.json'))
         if runs:
@@ -121,13 +135,20 @@ def export(output, models=None, *, xany_only=True, source=None):
     stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     destination = output / 'exports' / f'{source_name}_candidates_{stamp}_{time.time_ns()}'
     destination.mkdir(parents=True, exist_ok=False)
+    (destination / 'preview').mkdir()
     report = {'directory': str(destination), 'annotation_status': 'review',
+              'scope': scope, 'run_id': run_id,
               'format': 'xanylabeling' if xany_only else 'multi_format',
               'verified_ground_truth': False, 'samples': 0, 'models': {}, 'errors': [],
+              'preview_samples': 0, 'preview_errors': [],
               'validation_scope': 'PNG headers, dimensions, label classes/coordinates, pairing; no model accuracy claim'}
     selected = set(models) if models is not None else None
     with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
-        rows = db.execute("SELECT model,details FROM items WHERE status='complete' ORDER BY key").fetchall()
+        if scope == 'history':
+            rows = db.execute("SELECT model,details FROM items WHERE status='complete' ORDER BY key").fetchall()
+        else:
+            rows = db.execute("SELECT model,details FROM items JOIN run_items ON item_key=key "
+                              "WHERE status='complete' AND run_id=? ORDER BY key", (run_id,)).fetchall()
     manifests = []
     detection_classes = {}
     detection_tasks = {}
@@ -306,7 +327,20 @@ def export(output, models=None, *, xany_only=True, source=None):
                 stats['segmentation_images'] += bool(masks)
                 stats['empty_detection_review'] += classes is not None and not lines
                 report['samples'] += 1
+                preview_relative = Path('preview') / _part(model) / (name + '.jpg')
+                preview_info = None
+                try:
+                    from .field_preview import render_preview
+                    preview_info = render_preview(image, destination / preview_relative, annotation,
+                        model=model, product=record['product'], face=record['face'],
+                        ng_filter=record.get('ng_filter'))
+                    report['preview_samples'] += 1
+                except Exception as exc:
+                    # A visualization failure must not discard a committed dataset sample.
+                    report['preview_errors'].append({'model': model, 'sample': name, 'error': str(exc)})
                 manifests.append({**record, 'directory': str(annotation_relative),
+                                  'preview': preview_relative.as_posix() if preview_info else None,
+                                  'preview_info': preview_info,
                                   'classification': class_name,
                                   'image': name + '.png', 'annotation_status': 'review',
                                   'original_sample_directory': str(folder), 'verified_ground_truth': False})
@@ -357,6 +391,13 @@ def export(output, models=None, *, xany_only=True, source=None):
         'Classification folders and segmentation masks contain pseudo-labels, not human ground truth.\n'
         'Original sources and model versions are recorded in manifest.jsonl.\n'), encoding='utf-8')
     report['valid'] = not report['errors']
+    report['preview_valid'] = not report['preview_errors']
+    (destination / 'preview' / 'README.txt').write_text(
+        'Review-only JPEG overlays grouped by model/check task. Do not use as training images.\n'
+        'Overlays use the current exported JSON (including edits); they are not verified ground truth.\n'
+        'Original filename and stable crop identity match the dataset filenames.\n'
+        'Longest image side <= 1600px, with an additional 112px information header.\n'
+        'See validation.json preview_errors for visualization failures.\n', encoding='utf-8')
     _write(destination / 'validation.json', report)
     if report['valid'] and not xany_only:
         report['training_dataset'] = flatten_snapshot(destination)

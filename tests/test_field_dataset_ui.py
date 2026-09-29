@@ -11,7 +11,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 from cosmos_toolbox.field_dataset import MODEL_IDS
 from cosmos_toolbox.field_dataset_ui import DatasetWorker, FieldDatasetPage, configured_product
 from cosmos_toolbox.capability_catalog import plan_default_capabilities
@@ -27,6 +27,7 @@ class FieldDatasetUiTest(unittest.TestCase):
         self.assertEqual(set(page.checks), set(MODEL_IDS))
         self.assertEqual(len(page.checks), 14)
         self.assertEqual(page.environment.currentText(), 'onnx-gpu')
+        self.assertFalse(page.ng_only.isChecked())
         page._select("all")
         self.assertTrue(all(c.isChecked() for c in page.checks.values()))
         page._select("none")
@@ -116,6 +117,84 @@ class FieldDatasetUiTest(unittest.TestCase):
         planned = plan_default_capabilities([], include_project_capabilities=True)
         item = next(p for p in planned if p.spec.key == "cabf.field_dataset")
         self.assertEqual(item.page_factory_key, "cabf_field_dataset")
+
+    def test_batch_summary_does_not_hide_model_failures(self):
+        page = FieldDatasetPage()
+        page._on_result({'batch': True, 'errors': [], 'results': [{
+            'completed_model_jobs': 7, 'failed_model_jobs': 1, 'review_model_jobs': 2,
+            'not_applicable_model_jobs': 3, 'filtered_model_jobs': 4,
+            'models': {'hook_detector': {'complete': 0, 'not_applicable': 1, 'filtered': 1, 'samples': 0}},
+        }]})
+        self.assertIn('有技术失败', page.status.text())
+        self.assertIn('未启用 3', page.status.text())
+        self.assertIn('需复核 2', page.status.text())
+        self.assertIs(page.tabs.currentWidget(), page.result_page)
+        self.assertEqual(page.result_table.item(0, 3).text(), '1')
+        page.close()
+
+    def test_toolbox_factory_seeds_paths_and_protects_window(self):
+        from cosmos_toolbox.default_capabilities import _create_field_dataset_activity
+
+        cases = [
+            ('D:/images/0907', 'D:/dataset', 'D:/exports', 'D:/images/0907'),
+            ('', 'D:/dataset', '', 'D:/dataset'),
+            ('', '', '', ''),
+        ]
+        for image_dir, dataset_root, output_root, expected_source in cases:
+            with self.subTest(image_dir=image_dir, dataset_root=dataset_root):
+                window = QWidget()
+                runtime = SimpleNamespace(
+                    window=window,
+                    project_context=SimpleNamespace(state=SimpleNamespace(
+                        image_dir=image_dir, dataset_root=dataset_root,
+                        output_root=output_root,
+                    )),
+                )
+                try:
+                    page = _create_field_dataset_activity(runtime, window)
+                    self.assertEqual(page.source.toPlainText(), expected_source)
+                    if output_root:
+                        self.assertEqual(page.output.text(), output_root)
+                    self.assertIs(page._closing_window, window)
+                    self.assertTrue(window.close())
+                finally:
+                    window.close()
+                    window.deleteLater()
+
+    def test_styled_layout_keeps_controls_readable_at_small_sizes(self):
+        from cosmos_toolbox.ui.theme import build_toolbox_stylesheet
+
+        page = FieldDatasetPage()
+        page.setStyleSheet(build_toolbox_stylesheet())
+        try:
+            for width, height in [(1000, 700), (760, 600), (560, 560)]:
+                with self.subTest(width=width, height=height):
+                    page.resize(width, height)
+                    page.show()
+                    self.app.processEvents()
+                    self.assertLessEqual(page.minimumSizeHint().height(), height)
+                    self.assertEqual(page.width(), width)
+                    self.assertEqual(page.height(), height)
+                    page.tabs.setCurrentWidget(page.settings_scroll)
+                    self.app.processEvents()
+                    for field in (page.source, page.output, page.environment,
+                                  page.product_config, page.face, page.mode, page.limit):
+                        self.assertGreaterEqual(field.height(), field.minimumSizeHint().height())
+                    self.assertGreater(page.settings_scroll.verticalScrollBar().maximum(), 0)
+                    page.tabs.setCurrentWidget(page.models_group)
+                    self.app.processEvents()
+                    self.assertEqual(page.model_scroll.horizontalScrollBar().maximum(), 0)
+                    for check in page.checks.values():
+                        self.assertGreaterEqual(check.height(), check.sizeHint().height())
+                        self.assertGreaterEqual(check.width(), check.sizeHint().width())
+                    for button in (page.start_button, page.stop_button, page.open_button):
+                        self.assertTrue(page.rect().contains(button.geometry()))
+                        self.assertGreaterEqual(button.width(), button.sizeHint().width())
+            page._select('all')
+            self.assertEqual(page.tabs.tabText(page.tabs.indexOf(page.models_group)), '模型选择（14）')
+        finally:
+            page.close()
+            page.deleteLater()
 
     def test_selected_environment_routes_to_child_runner(self):
         control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())

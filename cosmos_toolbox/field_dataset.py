@@ -109,13 +109,15 @@ def _save_sample(folder, sample, identity, model, mode):
 
 
 def run(source, output, product, selected, face='all', mode='auto', limit=None, control=None, on_progress=None,
-        product_config=None):
+        product_config=None, ng_only=False, export_scope='current'):
     from .paths import ensure_import_paths
     ensure_import_paths()
     import cv2
     import numpy as np
     from .field_models import FieldModels
     selected = list(dict.fromkeys(selected))
+    if export_scope not in {'current', 'history'}:
+        raise ValueError('无效导出范围')
     if product not in {'D01-L', 'D01-R'} or mode not in {'auto', 'images'} or face not in {'all', 'top', 'bottom'}:
         raise ValueError('产品、生成方式或正反面无效')
     if not selected or set(selected) - MODEL_IDS.keys():
@@ -123,6 +125,8 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
     source, output = Path(source).resolve(), Path(output).resolve()
     if source == output or source in output.parents or output in source.parents:
         raise ValueError('输入与输出目录不能互相包含')
+    if ng_only:
+        output = output / 'ng_only'
     paths = scan(source, face)
     # The operator's selection owns product identity; filenames are provenance only.
     if limit is not None:
@@ -140,10 +144,17 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
         raise RuntimeError('此输出目录已有生成任务运行')
     db = sqlite3.connect(output / 'run.db')
     db.execute('CREATE TABLE IF NOT EXISTS items (key TEXT PRIMARY KEY, source TEXT, model TEXT, status TEXT, details TEXT)')
+    db.execute('CREATE TABLE IF NOT EXISTS run_items (run_id TEXT, item_key TEXT, PRIMARY KEY(run_id,item_key))')
+    run_id = str(time.time_ns())
     models = None
-    processed = skipped = failures = 0
+    gate = None
+    processed = skipped = failures = filtered = 0
+    not_applicable = review = visited = 0
     try:
         models = FieldModels(product, product_config=product_config) if product_config else FieldModels(product)
+        if ng_only:
+            from .field_dataset_ng import NGGate
+            gate = NGGate(models)
         if on_progress and getattr(models, 'product_config_path', None):
             on_progress({'message': f'实际产品配置：{models.product_config_path}'})
         snapshot = getattr(models, 'snapshot', {'product': product})
@@ -152,9 +163,17 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
         from . import field_models
         snapshot = {**snapshot, 'adapter_sha256': hashlib.sha256(Path(field_models.__file__).read_bytes()).hexdigest()
                     if getattr(field_models, '__file__', None) else 'test'}
+        snapshot['tool_sources'] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                   for path in sorted(Path(__file__).parent.glob('field*.py'))}
+        if ng_only:
+            from . import field_dataset_ng
+            snapshot = {**snapshot, 'ng_only': True,
+                        'ng_gate_sha256': hashlib.sha256(Path(field_dataset_ng.__file__).read_bytes()).hexdigest()}
         version = hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode()).hexdigest()[:12]
-        _json(output / 'runs' / f'{time.time_ns()}.json', {'product': product, 'selected': selected,
-              'mode': mode, 'source': str(source), 'models': snapshot, 'version': version})
+        timings = {'decode_seconds': 0., 'ng_seconds': 0., 'generate_seconds': 0.,
+                   'prediction_cache_hits': 0, 'prediction_cache_misses': 0, 'calibration_reused': 0}
+        _json(output / 'runs' / f'{run_id}.json', {'run_id': run_id, 'product': product, 'selected': selected,
+              'mode': mode, 'ng_only': ng_only, 'source': str(source), 'models': snapshot, 'version': version})
         for index, path in enumerate(paths):
             if shutil.disk_usage(output).free < 2 * 1024**3:
                 raise RuntimeError('输出磁盘可用空间不足 2 GiB，已提交进度保存在 run.db')
@@ -166,15 +185,19 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
             stat = path.stat()
             identity_text = f'{path}|{stat.st_size}|{stat.st_mtime_ns}|{version}|{mode}'
             sid = hashlib.sha256(identity_text.encode()).hexdigest()[:20]
+            db.executemany('INSERT OR IGNORE INTO run_items VALUES (?,?)',
+                           [(run_id, sid + model) for model in selected])
+            db.commit()
             pending = []
             for model in selected:
                 found = db.execute('SELECT status,details FROM items WHERE key=?', (sid + model,)).fetchone()
                 intact = found and found[0] == 'complete' and _intact(json.loads(found[1]))
-                if intact:
+                if intact or (found and found[0] in {'filtered', 'not_applicable'}):
                     skipped += 1
                 else:
                     pending.append(model)
             if not pending:
+                visited += 1
                 continue
             match = re.search(r'_(\d{8})_(\d{6})\d{3}_(top|bottom)$', path.stem)
             group = str(path.parent.relative_to(source)) + '/' + (
@@ -183,16 +206,63 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
             identity = {'source': str(path), 'product': product, 'face': path.stem.rsplit('_', 1)[-1],
                         'split': split, 'sample_id': sid, 'model_version': version}
             try:
+                started = time.perf_counter()
                 image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+                timings['decode_seconds'] += time.perf_counter() - started
                 if image is None:
                     raise ValueError('原图解码失败')
-                results = models.generate(image, pending, mode=mode, face=identity['face'])
+                if hasattr(models, 'begin_image'):
+                    models.begin_image(image)
+                started = time.perf_counter()
+                decisions = gate.evaluate(image, identity['face'], pending) if gate else {}
+                timings['ng_seconds'] += time.perf_counter() - started
+                allowed = [m for m in pending if not gate or decisions[m]['save']]
+                started = time.perf_counter()
+                results = models.generate(image, allowed, mode=mode, face=identity['face']) if allowed else {}
+                timings['generate_seconds'] += time.perf_counter() - started
+                if hasattr(models, 'inference_cache'):
+                    timings['prediction_cache_hits'] += models.inference_cache.hits
+                    timings['prediction_cache_misses'] += models.inference_cache.misses
+                    timings['calibration_reused'] += models.calibration_reused
+                    models.inference_cache.reset()
+                    models._frame_image = None
+                    models.shared_calibration = None
                 for model in pending:
                     key = sid + model
                     try:
+                        if gate and not decisions[model]['save']:
+                            decision = decisions[model]
+                            if decision['reason'] == 'not_executed' and not decision.get('checks'):
+                                status = 'not_applicable'
+                                not_applicable += 1
+                                decision = {**decision, 'message': '当前面没有启用与该模型关联的检查项'}
+                            elif decision['reason'] in {'execution_error', 'not_executed'}:
+                                status = 'failed'
+                                failures += 1
+                                decision = {**decision, 'error': 'NG filter: ' + decision['reason']}
+                            else:
+                                status = 'filtered'
+                                filtered += 1
+                            db.execute('INSERT OR REPLACE INTO items VALUES (?,?,?,?,?)',
+                                       (key, str(path), model, status, json.dumps(decision, ensure_ascii=False)))
+                            db.commit()
+                            continue
+                        review_reason = getattr(models, 'review_reasons', {}).get(model)
+                        if review_reason or (model in results and not results[model]):
+                            review += 1
+                            detail = {'reason': 'missing_roi', 'message': review_reason or '没有可导出的裁片，请复核上游定位'}
+                            if gate:
+                                detail['ng_filter'] = decisions[model]
+                            db.execute('INSERT OR REPLACE INTO items VALUES (?,?,?,?,?)',
+                                       (key, str(path), model, 'review', json.dumps(detail, ensure_ascii=False)))
+                            db.commit()
+                            continue
                         if model not in results:
                             raise RuntimeError(getattr(models, 'errors', {}).get(model, '没有生成结果'))
                         samples = results[model]
+                        if gate:
+                            for sample in samples:
+                                sample.setdefault('metadata', {})['ng_filter'] = decisions[model]
                         if not samples:
                             raise RuntimeError('没有可导出的候选裁片，需要复核上游定位')
                         target = output / 'datasets' / model / product / identity['face'] / sid
@@ -228,20 +298,36 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
                                (sid + model, str(path), model, 'failed', json.dumps({'error': str(exc)}, ensure_ascii=False)))
                     failures += 1
                 db.commit()
+            visited += 1
             if on_progress:
                 on_progress({'current': index + 1, 'total': len(paths), 'source': str(path),
-                             'completed': processed, 'failed': failures, 'skipped': skipped})
-        rows = db.execute('SELECT source,model,status,details FROM items ORDER BY key').fetchall()
+                             'completed': processed, 'failed': failures, 'skipped': skipped, 'filtered': filtered,
+                             'not_applicable': not_applicable, 'review': review})
+        rows = db.execute('SELECT source,model,status,details FROM items JOIN run_items ON item_key=key '
+                          'WHERE run_id=? ORDER BY key', (run_id,)).fetchall()
         summary = {'scanned': len(paths), 'completed_model_jobs': processed, 'failed_model_jobs': failures,
-                   'skipped_model_jobs': skipped, 'total_model_jobs': len(rows),
+                   'skipped_model_jobs': skipped, 'filtered_model_jobs': filtered, 'ng_only': ng_only,
+                   'not_applicable_model_jobs': not_applicable, 'review_model_jobs': review,
+                   'visited_images': visited, 'planned_model_jobs': len(paths) * len(selected),
+                   'model_totals_scope': 'current_run', 'run_id': run_id,
+                   'timings': timings,
+                   'output': str(output), 'total_model_jobs': len(rows),
                    'stopped': bool(control and control.stopped.is_set())}
         summary['models'] = {model: {
             'complete': sum(r[1] == model and r[2] == 'complete' for r in rows),
             'failed': sum(r[1] == model and r[2] == 'failed' for r in rows),
+            'filtered': sum(r[1] == model and r[2] == 'filtered' for r in rows),
+            'not_applicable': sum(r[1] == model and r[2] == 'not_applicable' for r in rows),
+            'review': sum(r[1] == model and r[2] == 'review' for r in rows),
             'samples': sum(len(json.loads(r[3])) for r in rows if r[1] == model and r[2] == 'complete'),
         } for model in selected}
         _json(output / 'failures.json', [{'source': r[0], 'model': r[1], **json.loads(r[3])}
                                        for r in rows if r[2] == 'failed'])
+        _json(output / 'filtered.json', [{'source': r[0], 'model': r[1], **json.loads(r[3])}
+                                       for r in rows if r[2] == 'filtered'])
+        for state, filename in [('not_applicable', 'not_applicable.json'), ('review', 'review.json')]:
+            _json(output / filename, [{'source': r[0], 'model': r[1], **json.loads(r[3])}
+                                     for r in rows if r[2] == state])
         _json(output / 'summary.json', summary)
         temp = output / 'manifest.jsonl.tmp'
         with temp.open('w', encoding='utf-8') as stream:
@@ -251,12 +337,17 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
         os.replace(temp, output / 'manifest.jsonl')
         if rows and not summary['stopped']:
             from .field_dataset_export import export
-            summary['export'] = export(output, selected, source=source)
+            summary['export'] = export(output, selected, source=source, scope=export_scope,
+                                       run_id=run_id if export_scope == 'current' else None)
             _json(output / 'summary.json', summary)
         return summary
     finally:
         db.close()
         lock.seek(0); msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1); lock.close()
+        if gate is not None:
+            gate.close()
+        if models is not None and hasattr(models, 'close'):
+            models.close()
 
 
 def main():
@@ -268,6 +359,8 @@ def main():
     parser.add_argument('--mode', default='auto', choices=['auto', 'images'])
     parser.add_argument('--limit', type=int)
     parser.add_argument('--product-config', help='Optional product YAML; defaults to the selected product .yaml')
+    parser.add_argument('--ng-only', action='store_true', help='Save only business-NG candidates')
+    parser.add_argument('--export-scope', choices=['current', 'history'], default='current')
     args = vars(parser.parse_args()); args['selected'] = args.pop('models')
     print(run(**args, on_progress=lambda p: print(json.dumps(p, ensure_ascii=False), flush=True)))
 

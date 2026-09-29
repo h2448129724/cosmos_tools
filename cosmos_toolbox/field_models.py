@@ -26,6 +26,17 @@ CLASSES = {
 }
 CLASSIFIERS = {'ear_placement_classifier', 'tail_placement_classifier',
                'tail_cloth_seam_classifier', 'hook_detector'}
+# The tool stores BGR pixels. These are the current legacy model call contracts,
+# not an instruction to swap an entire source image or change production code.
+INPUT_CONTRACTS = {
+    **{name: {'input': 'RGB', 'normalization': '0..1',
+              'resize': 'center_crop' if name in CLASSIFIERS else 'letterbox'} for name in CLASSES},
+    'glue_segment': {'input': 'RGB', 'normalization': 'ImageNet', 'resize': 'UNet'},
+    'knife_segment': {'input': 'RGB', 'normalization': 'ImageNet', 'resize': 'UNet'},
+    'reinforcement_placement_detector': {'input': 'BGR', 'normalization': 'internal RGB/ImageNet', 'resize': 'configured input_size'},
+    'sew_point_detector': {'input': 'BGR', 'normalization': 'internal RGB/0..1', 'resize': 'tiled'},
+    'sew_point_connector': {'input': 'BGR', 'normalization': 'patch BGR/0..1', 'resize': 'affine patches'},
+}
 
 
 def shape(label, points, kind='rectangle', score=None, group_id=None):
@@ -44,6 +55,24 @@ class _ToolGlueRGBAdapter:
     def predict_proba_batch(self, images):
         return self.segmenter.predict_proba_batch(
             [cv2.cvtColor(image, cv2.COLOR_BGR2RGB) for image in images])
+
+
+class _ToolKnifeRGBAdapter:
+    """Convert tool BGR crops at the boundary, not inside production code."""
+
+    def __init__(self, checker):
+        self.checker = checker
+
+    def __getattr__(self, name):
+        return getattr(self.checker, name)
+
+    def predict_mask(self, image_bgr, threshold=.5):
+        return self.checker.predict_mask(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), threshold)
+
+    def evaluate(self, image_bgr, *args, **kwargs):
+        # evaluate calls the original checker's predict_mask internally. Convert
+        # once here; wrapping that method too would swap the channels twice.
+        return self.checker.evaluate(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB), *args, **kwargs)
 
 
 class FieldModels:
@@ -77,16 +106,34 @@ class FieldModels:
         self.product_config_path = product_path.resolve()
         self.config = self._read_group(backend_path, 'cab_f')
         self.inspection = self._read_group(product_path, 'inspection')
+        for name, overrides in (self.inspection.get('model_params') or {}).items():
+            if not isinstance(overrides, dict):
+                raise ValueError(f'model_params.{name} must be a mapping')
+            self.config[name] = {**self.config.get(name, {}), **overrides}
         self.config['knife_segment'] = dict(self.config['knife_checker'])
         density = self.config['sew_point_density']
         self.config['sew_point_connector'] = {
-            'path': density['connect_model_path'], 'patch_model_path': density['patch_model_path']}
+            **density, 'path': density['connect_model_path'], 'patch_model_path': density['patch_model_path']}
         cache_dir = Path(os.environ.get('WEIGHTREG_CACHE', Path.home() / '.cache/weightreg'))
         manifest_path = cache_dir / 'resolved.json'
         manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
         self.snapshot = {'product': product, 'product_config_path': str(self.product_config_path),
                          'product_sha256': self._hash(product_path),
                          'backend_sha256': self._hash(backend_path), 'models': {}}
+        self.snapshot['input_contracts'] = INPUT_CONTRACTS if not self.project_layout else {'runtime': 'project_adapter'}
+        self.snapshot['templates'] = {}
+        for params in self.inspection.get('match_template', []):
+            if params and params.get('path'):
+                path = (self.template_root / params['path']).resolve()
+                self.snapshot['templates'][str(path)] = self._hash(path) if path.is_file() else 'missing'
+        # Hash actual source contents, including uncommitted changes. A Git HEAD
+        # alone cannot identify the algorithms running in a dirty working tree.
+        roots = [ROOT / 'algo', ROOT / 'biz', ROOT / 'utils']
+        if self.project_layout:
+            roots.extend([project_root / 'algorithms', ROOT / 'projects/_shared'])
+        self.snapshot['runtime_sources'] = {
+            str(path.relative_to(ROOT)): self._hash(path)
+            for root in roots for path in sorted(root.rglob('*.py')) if path.is_file()}
         for name, config in self.config.items():
             if not isinstance(config, dict):
                 continue
@@ -109,8 +156,37 @@ class FieldModels:
                     model_paths[key] = {'reference': ref, 'missing': True}
             self.snapshot['models'][name] = {'paths': model_paths, 'config': config.copy()}
         self.sessions = {}
+        self.shared_yolo = {}
         self.errors = {}
         self.cache = {}
+        from .field_prediction_cache import FramePredictionCache
+        self.inference_cache = FramePredictionCache()
+        self._frame_image = None
+
+    def begin_image(self, image):
+        self.inference_cache.reset()
+        self._frame_image = image
+        self.shared_calibration = None
+        self.calibration_reused = 0
+
+    def close(self):
+        # Remove instance-local callable closures before dropping the sessions;
+        # otherwise closures retaining bound methods can keep ORT alive until GC.
+        held = {id(model): model for model in [*self.sessions.values(), *self.shared_yolo.values()]}
+        for model in held.values():
+            if getattr(model, '_tool_cached_mask', False):
+                del model.predict_mask
+                del model._tool_cached_mask
+            if getattr(model, '_tool_yolo_rgb', False):
+                del model.predict
+                del model._tool_raw_predict
+                del model._tool_yolo_rgb
+        self.sessions.clear()
+        self.shared_yolo.clear()
+        self.cache.clear()
+        self.inference_cache.reset()
+        self._frame_image = self.image = None
+        self.shared_calibration = None
 
     @staticmethod
     def _read_group(path, group):
@@ -145,10 +221,20 @@ class FieldModels:
         if not Path(cfg.get('path', '')).is_file():
             raise FileNotFoundError(f'{name}: local model unavailable: {cfg.get("path")}')
         if name in CLASSES:
+            task = 'cls' if name in CLASSIFIERS else ('obb' if name == 'qr_yolo_cut' else 'det')
+            shared = getattr(self, 'shared_yolo', {}).get(name)
+            if (shared is not None and shared.model_path == cfg['path'] and shared.task == task
+                    and shared.classes == cfg.get('classes', CLASSES[name])
+                    and shared.conf_thres == cfg.get('conf', .5)
+                    and shared.iou_thres == cfg.get('iou', .45)
+                    and shared.agnostic == cfg.get('agnostic', False)
+                    and not shared.filter_classes and not cfg.get('filter_classes')
+                    and shared.epsilon_factor == cfg.get('epsilon_factor', .005)):
+                self.sessions[name] = shared
+                return shared
             runtime = self._runtime('algo.models.yolo', '.algorithms.yolo_adapter')
             YOLO = getattr(runtime, 'CABFOnnxYolo' if self.project_layout else 'YOLO')
-            task = 'cls' if name in CLASSIFIERS else ('obb' if name == 'qr_yolo_cut' else 'det')
-            model = YOLO({'model_path': cfg['path'], 'classes': CLASSES[name], 'task': task,
+            model = YOLO({**cfg, 'model_path': cfg['path'], 'classes': cfg.get('classes', CLASSES[name]), 'task': task,
                           'conf_threshold': cfg.get('conf', .5), 'iou_threshold': cfg.get('iou', .45)})
         else:
             module, cls = {
@@ -164,6 +250,13 @@ class FieldModels:
             else:
                 modern_module = 'knife' if module == 'knife_checker' else module
                 model = getattr(self._runtime(f'algo.cab_f.{module}', f'.algorithms.{modern_module}'), cls)(cfg)
+                if name == 'knife_segment' and hasattr(self, 'inference_cache'):
+                    predict_mask = model.predict_mask
+                    def cached_mask(image_bgr, threshold=.5):
+                        return self.inference_cache.call('knife', {**cfg, 'threshold': threshold}, image_bgr,
+                                                         lambda: predict_mask(image_bgr, threshold))
+                    model.predict_mask = cached_mask
+                    model._tool_cached_mask = True
         self.sessions[name] = model
         return model
 
@@ -174,7 +267,15 @@ class FieldModels:
             raise self.cache[failure_key]
         if key not in self.cache:
             try:
-                self.cache[key] = self._model(name).predict(sample['image'])
+                image = sample['image']
+                if not getattr(self, 'project_layout', False):
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                model = self._model(name)
+                if hasattr(self, 'inference_cache') and not self.project_layout:
+                    from .field_prediction_cache import yolo_predict
+                    self.cache[key] = yolo_predict(self.inference_cache, model, image)
+                else:
+                    self.cache[key] = model.predict(image)
             except Exception as exc:
                 self.cache[failure_key] = exc
                 raise
@@ -224,7 +325,8 @@ class FieldModels:
                         continue
                     cx, cy, bw, bh = det['box']
                     box = [(cx+sample['metadata']['scaled_x_offset'])/sx, cy/sy, bw/sx, bh/sy]
-                    fixed = [700, 700] if label == 'ear' else None
+                    params = self.inspection.get('conf', {}).get(self.face, {})
+                    fixed = params.get('ear', {}).get('placement', {}).get('wh', [700, 700]) if label == 'ear' else None
                     results.append(self._crop(source, box, f'{label}_{len(results)}', fixed))
             self.cache[key] = results
         return self.cache[key]
@@ -265,6 +367,19 @@ class FieldModels:
 
     def _calibrate_once(self):
         if 'calibrated' not in self.cache:
+            shared = getattr(self, 'shared_calibration', None)
+            if shared is not None:
+                params = dict(self.inspection['match_template'][0 if self.face == 'top' else 1])
+                params['path'] = str((self.template_root / params['path']).resolve())
+                digest = hashlib.sha256(memoryview(np.ascontiguousarray(self.image)).cast('B')).hexdigest()
+                if params == shared['params'] and digest == shared['pixels']:
+                    meta = shared['metadata']
+                    if meta.get('glue_dice', 0) > .5:
+                        self.cache['calibrated'] = shared['transform'](
+                            self.image, meta['offset'], meta['angle'], scale=meta.get('scale', 1.0), border_value=0)
+                        self.cache['calibration_metadata'] = dict(meta)
+                        self.calibration_reused += 1
+                        return self.cache['calibrated']
             GlueExtractor = self._runtime('algo.cab_f.glue_extraction', '.algorithms.glue_extraction').GlueExtractor
             CADMatcher = self._runtime('algo.cab_f.match_glue', '.algorithms.match_glue').CADMatcher
             calibrated_pic = self._runtime('algo.cab_f.run_calibration', '.algorithms.calibration').calibrated_pic
@@ -293,7 +408,9 @@ class FieldModels:
         if name == 'tail_cloth_roi_detector':
             return self._cloth()
         if name == 'tail_placement_classifier':
-            return self._children('tail', 'tail_roi_detector', 'placement', [350, 350])
+            params = self.inspection.get('conf', {}).get(self.face, {})
+            fixed = params.get('tail', {}).get('placement', {}).get('wh', [350, 350])
+            return self._children('tail', 'tail_roi_detector', 'placement', fixed)
         if name == 'hook_detector':
             return self._children('tail', 'tail_roi_detector', 'hook')
         if name == 'tail_cloth_seam_classifier':
@@ -313,7 +430,9 @@ class FieldModels:
             return [dict(sample, metadata={**sample['metadata'], 'source_scale': [.5, .5]})
                     for sample in self._tiles(half, 256, 'glue')]
         if name == 'error_detector':
-            return list(self._tiles(self.image, 1024, 'error', 896))
+            config = self.config[name]
+            return list(self._tiles(self.image, int(config.get('tile_size', 1024)), 'error',
+                                    int(config.get('tile_stride', 896))))
         if name in {'sew_point_detector', 'sew_point_connector'}:
             # Explicit tail-cloth scope, preserved in each exported sample.
             return [self._sample(tile['image'], f'{cloth["metadata"]["crop_key"]}_{tile["metadata"]["crop_key"]}',
@@ -335,12 +454,41 @@ class FieldModels:
         raise ValueError(f'Unknown dataset model: {name}')
 
     @staticmethod
+    def _simplify_contour(contour, epsilon_px=1.0, min_iou=.98):
+        """Reduce vertices without removing objects; compare to the old polygon.
+
+        Raster IoU protects thin/small features from a perimeter-only tolerance.
+        Coordinates are crop pixels, independent of preview scaling. Masks stay
+        lossless; this only changes the editable polygon representation.
+        """
+        if epsilon_px <= 0 or not 0 < min_iou <= 1:
+            raise ValueError('Invalid polygon simplification tolerance')
+        if len(contour) <= 4 or cv2.contourArea(contour) <= 0:
+            return contour
+        x, y, width, height = cv2.boundingRect(contour)
+        offset = np.array([[[x, y]]], dtype=contour.dtype)
+        reference = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(reference, [contour - offset], 1)
+        candidate_mask = np.zeros_like(reference)
+        for tolerance in (epsilon_px, epsilon_px / 2, epsilon_px / 4, epsilon_px / 8):
+            candidate = cv2.approxPolyDP(contour, tolerance, True)
+            if len(candidate) < 3 or len(candidate) >= len(contour) or cv2.contourArea(candidate) <= 0:
+                continue
+            candidate_mask.fill(0)
+            cv2.fillPoly(candidate_mask, [candidate - offset], 1)
+            union = np.count_nonzero(reference | candidate_mask)
+            overlap = np.count_nonzero(reference & candidate_mask)
+            if union and overlap / union >= min_iou:
+                return candidate
+        return contour
+
+    @staticmethod
     def _mask_shapes(masks):
         shapes = []
         for label, mask in masks.items():
             contours, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for contour in contours:
-                points = contour.reshape(-1, 2)
+                points = FieldModels._simplify_contour(contour).reshape(-1, 2)
                 if len(points) >= 3:
                     shapes.append(shape(label, points, 'polygon'))
         return shapes
@@ -369,7 +517,9 @@ class FieldModels:
         elif name in {'glue_segment', 'knife_segment', 'reinforcement_placement_detector'}:
             model = self._model(name)
             if name == 'knife_segment':
-                masks = model.predict_mask(image, self.config[name].get('threshold', .5))
+                params = self.inspection.get('conf', {}).get(self.face, {}).get('knife', {})
+                masks = _ToolKnifeRGBAdapter(model).predict_mask(
+                    image, params.get('threshold', self.config[name].get('threshold', .5)))
             elif name == 'glue_segment':
                 # Only this tool converts its OpenCV crops to the model's RGB input.
                 masks = {'glue': model.predict_mask(cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
@@ -380,6 +530,10 @@ class FieldModels:
                      for label, mask in masks.items()}
             sample['masks'] = masks
             sample['shapes'] = self._mask_shapes(masks)
+            sample['metadata']['polygon_simplification'] = {
+                'method': 'approxPolyDP', 'max_epsilon_px': 1.0,
+                'min_raster_iou': .98, 'reference': 'original_external_contour',
+                'mask_modified': False}
         else:
             point_key = ('points', sample['metadata']['crop_key'])
             if point_key not in self.cache:
@@ -403,13 +557,17 @@ class FieldModels:
             raise ValueError(f'Unsupported generation mode: {mode}')
         if face not in {'top', 'bottom'}:
             raise ValueError(f'Unsupported face: {face}')
+        if hasattr(self, 'inference_cache') and self._frame_image is not image:
+            self.begin_image(image)
         self.face, self.image, self.cache, self.errors = face, image, {}, {}
+        self.review_reasons = {}
         output = {}
         for name in selected:
             try:
                 inputs = self._inputs(name)
                 if not inputs:
-                    raise ValueError('Required ROI not detected; no negative sample inferred')
+                    self.review_reasons[name] = '未检测到所需 ROI，无法生成裁片；请复核上游定位，不自动作为负样本。'
+                    continue
                 output[name] = []
                 for item in inputs:
                     # Intermediate cache entries must never receive target labels.
@@ -419,4 +577,5 @@ class FieldModels:
                 self.errors[name] = f'{type(exc).__name__}: {exc}'
                 output.pop(name, None)
         self.image, self.cache = None, {}
+        self._frame_image = None
         return output

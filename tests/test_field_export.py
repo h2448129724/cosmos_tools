@@ -8,7 +8,10 @@ import numpy as np
 import pytest
 
 from functools import partial
-from cosmos_toolbox.field_dataset_export import export as default_export
+from cosmos_toolbox.field_dataset_export import export as scoped_export
+
+# Legacy fixtures have no run provenance; historical export must be explicit.
+default_export = partial(scoped_export, scope='history')
 
 # Retain regression coverage for explicit legacy multi-format exports.
 export = partial(default_export, xany_only=False)
@@ -31,6 +34,10 @@ def test_default_export_is_one_xany_pair_per_sample(tmp_path, empty):
     assert not any(p.name in {'train', 'val'} for p in root.rglob('*') if p.is_dir())
     assert not list(root.rglob('data.yaml'))
     assert not list(root.rglob('mask_*.png'))
+    assert report['preview_valid'] and report['preview_samples'] == 1
+    preview = next((root / 'preview/roi_detector').glob('*.jpg'))
+    assert preview.stem == image.stem
+    assert cv2.imread(str(preview)) is not None
 
 
 def sample(tmp_path, model='roi_detector', shapes=None, metadata=None, text='0 0.5 0.5 0.5 0.5'):
@@ -126,6 +133,51 @@ def test_detection_uses_edited_json_not_stale_txt(tmp_path):
     deleted = export(tmp_path)
     assert deleted['valid']
     assert not list(Path(deleted['directory']).glob('*/D01-R/top/yolo_candidates/labels/train/*.txt'))
+
+
+def test_preview_error_is_reported_without_discarding_dataset(tmp_path, monkeypatch):
+    sample(tmp_path)
+    def broken(*args, **kwargs):
+        raise OSError('preview fixture failure')
+    monkeypatch.setattr('cosmos_toolbox.field_preview.render_preview', broken)
+    report = default_export(tmp_path)
+    assert report['valid'] and report['samples'] == 1
+    assert not report['preview_valid'] and report['preview_samples'] == 0
+    assert 'preview fixture failure' in report['preview_errors'][0]['error']
+
+
+@pytest.mark.parametrize('kind,points', [
+    ('rectangle', [[2, 2], [30, 15]]),
+    ('polygon', [[2, 2], [30, 2], [20, 15]]),
+    ('point', [[20, 10]]),
+    ('line', [[2, 2], [30, 15]]),
+])
+def test_preview_draws_shapes_and_preserves_input(tmp_path, kind, points):
+    from cosmos_toolbox.field_preview import render_preview
+    image = tmp_path / '原图.png'
+    cv2.imencode('.png', np.zeros((20, 40, 3), np.uint8))[1].tofile(str(image))
+    before = image.read_bytes()
+    target = tmp_path / 'preview.jpg'
+    render_preview(image, target, {'shapes': [{'label': '测试', 'shape_type': kind, 'points': points}]},
+                   model='fixture', product='D01-L', face='top')
+    output = cv2.imdecode(np.fromfile(str(target), dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert output[112:, :40].max() > 100
+    assert image.read_bytes() == before
+
+
+def test_backfill_preserves_export_and_skips_existing_previews(tmp_path):
+    from cosmos_toolbox.field_preview import backfill_previews
+    sample(tmp_path)
+    root = Path(default_export(tmp_path)['directory'])
+    preview = next((root / 'preview').rglob('*.jpg'))
+    preview.unlink()  # Simulate an old export without visualization files.
+    originals = {p: p.read_bytes() for p in root.rglob('*') if p.is_file() and 'preview' not in p.relative_to(root).parts}
+    report = backfill_previews(root)
+    assert report['generated'] == 1 and not report['errors']
+    before = preview.read_bytes()
+    assert backfill_previews(root)['skipped'] == 1
+    assert preview.read_bytes() == before
+    assert all(p.read_bytes() == data for p, data in originals.items())
 
 
 @pytest.mark.parametrize('label', ['up', 'down', None, 'unknown'])

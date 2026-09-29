@@ -47,6 +47,29 @@ def test_missing_config_group_has_actionable_error(tmp_path, monkeypatch):
         FieldModels('D01-R')
 
 
+def test_effective_config_and_runtime_template_fingerprints(tmp_path, monkeypatch):
+    import cosmos_toolbox.field_models as module
+    monkeypatch.setattr(module, 'ROOT', tmp_path)
+    backend = tmp_path / 'assets/config/backend_config.yaml'
+    backend.parent.mkdir(parents=True)
+    backend.write_text('cab_f:\n  knife_checker: {threshold: 0.5}\n  sew_point_density: {connect_model_path: x, patch_model_path: y}\n')
+    product = tmp_path / 'conf/cabf/D01-R.yaml'
+    product.parent.mkdir(parents=True)
+    product.write_text('inspection:\n  model_params:\n    knife_checker: {threshold: 0.8}\n  match_template:\n    - {path: template.png}\n')
+    template = tmp_path / 'template.png'
+    template.write_bytes(b'first')
+    algorithm = tmp_path / 'algo/example.py'
+    algorithm.parent.mkdir()
+    algorithm.write_text('VERSION = 1')
+    first = FieldModels('D01-R')
+    assert first.config['knife_segment']['threshold'] == .8
+    template.write_bytes(b'second')
+    algorithm.write_text('VERSION = 2')
+    second = FieldModels('D01-R')
+    assert first.snapshot['templates'] != second.snapshot['templates']
+    assert first.snapshot['runtime_sources'] != second.snapshot['runtime_sources']
+
+
 @pytest.mark.parametrize('modern', [True, False])
 def test_runtime_uses_matching_branch_namespace(monkeypatch, modern):
     import sys
@@ -199,3 +222,102 @@ def test_tool_calibration_rgb_adapter_preserves_session_and_bgr_input():
     assert wrapper.session is session
     assert calls[0][0, 0].tolist() == [30, 20, 10]
     assert source[0, 0].tolist() == [10, 20, 30]
+
+
+def test_knife_pseudo_mask_uses_rgb_without_changing_export_image(adapter):
+    model, _ = adapter
+    model.face = 'top'
+    model.config['knife_segment'] = {'threshold': .73}
+    image = np.full((12, 12, 3), [17, 83, 201], dtype=np.uint8)
+    original = image.copy()
+    mask = np.zeros((12, 12), dtype=np.uint8)
+    mask[2:8, 3:9] = 255
+
+    def predict_mask(actual, threshold):
+        np.testing.assert_array_equal(actual, original[..., ::-1])
+        assert threshold == .73
+        return {'ear': mask}
+
+    model.sessions['knife_segment'] = SimpleNamespace(predict_mask=predict_mask)
+    for _ in range(2):
+        sample = model._annotate('knife_segment', model._sample(image, 'knife_fixture'))
+        np.testing.assert_array_equal(sample['masks']['ear'], mask)
+        assert sample['shapes'][0]['label'] == 'ear'
+        assert sample['image'] is image
+    np.testing.assert_array_equal(image, original)
+
+
+def test_all_model_contracts_and_yolo_rgb_once(adapter):
+    from cosmos_toolbox.field_models import INPUT_CONTRACTS, CLASSES
+    from cosmos_toolbox.field_dataset import MODEL_IDS
+    assert set(INPUT_CONTRACTS) == set(MODEL_IDS)
+    model, _ = adapter
+    image = np.full((12, 12, 3), [17, 83, 201], dtype=np.uint8)
+    for name in CLASSES:
+        seen = []
+        model.sessions[name] = SimpleNamespace(predict=lambda pixels: seen.append(pixels.copy()))
+        sample = {'image': image, 'metadata': {'crop_key': name}}
+        model._predict(name, sample)
+        model._predict(name, sample)
+        assert len(seen) == 1
+        np.testing.assert_array_equal(seen[0], image[..., ::-1])
+    assert image[0, 0].tolist() == [17, 83, 201]
+
+
+def test_ng_yolo_session_is_reused_only_when_settings_match(tmp_path):
+    weights = tmp_path / 'model.onnx'
+    weights.touch()
+    model = object.__new__(FieldModels)
+    model.sessions = {}
+    model.config = {'roi_detector': {'path': str(weights), 'conf': .5}}
+    shared = SimpleNamespace(model_path=str(weights), task='det', classes=['ear', 'tail', 'dm'],
+                             conf_thres=.5, iou_thres=.45, agnostic=False,
+                             filter_classes=None, epsilon_factor=.005)
+    model.shared_yolo = {'roi_detector': shared}
+    def no_loading(*args):
+        raise RuntimeError('new session required')
+    model._runtime = no_loading
+    assert model._model('roi_detector') is shared
+    model.sessions.clear()
+    model.config['roi_detector']['conf'] = .8
+    with pytest.raises(RuntimeError, match='new session required'):
+        model._model('roi_detector')
+
+
+@pytest.mark.parametrize('kind', ['circle', 'ellipse', 'thin', 'tiny', 'concave'])
+def test_polygon_simplification_preserves_objects_and_raster_overlap(kind):
+    import cv2
+    mask = np.zeros((240, 320), dtype=np.uint8)
+    if kind == 'circle':
+        cv2.circle(mask, (150, 120), 85, 255, -1)
+    elif kind == 'ellipse':
+        cv2.ellipse(mask, (150, 120), (110, 60), 23, 0, 360, 255, -1)
+    elif kind == 'thin':
+        cv2.line(mask, (20, 20), (260, 200), 255, 3)
+    elif kind == 'tiny':
+        cv2.circle(mask, (15, 15), 3, 255, -1)
+    else:
+        cv2.fillPoly(mask, [np.array([[10, 10], [200, 20], [40, 100], [200, 200], [10, 190]])], 255)
+    original = mask.copy()
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    shapes = FieldModels._mask_shapes({'ear': mask})
+    assert len(shapes) == len(contours) == 1
+    old = np.zeros_like(mask)
+    new = np.zeros_like(mask)
+    cv2.fillPoly(old, contours, 1)
+    cv2.fillPoly(new, [np.asarray(shapes[0]['points'], dtype=np.int32)], 1)
+    assert np.count_nonzero(old & new) / np.count_nonzero(old | new) >= .98
+    assert 3 <= len(shapes[0]['points']) <= len(contours[0])
+    if kind in {'circle', 'ellipse'}:
+        assert len(shapes[0]['points']) < len(contours[0]) / 2
+    np.testing.assert_array_equal(mask, original)
+
+
+def test_polygon_simplification_keeps_separate_small_targets():
+    import cv2
+    mask = np.zeros((80, 100), dtype=np.uint8)
+    cv2.circle(mask, (20, 20), 3, 255, -1)
+    cv2.circle(mask, (70, 50), 15, 255, -1)
+    shapes = FieldModels._mask_shapes({'circle': mask})
+    assert len(shapes) == 2
+    assert all(item['label'] == 'circle' and len(item['points']) >= 3 for item in shapes)
