@@ -15,6 +15,22 @@ from types import SimpleNamespace
 PREFIX = 'FIELD_DATASET_EVENT '
 
 
+def control_state(control):
+    stopped = control.stopped.is_set()
+    export_event = getattr(control, 'export_on_stop', None)
+    return {'paused': control.paused.is_set(), 'stopped': stopped,
+            'export_on_stop': bool(stopped and export_event and export_event.is_set())}
+
+
+def apply_control_state(control, state):
+    (control.paused.set if state.get('paused') else control.paused.clear)()
+    if state.get('stopped'):
+        if state.get('export_on_stop'):
+            control.export_on_stop.set()
+        control.stopped.set()
+        control.paused.clear()
+
+
 def preload_torch(on_progress):
     """Load an existing Torch installation before ORT; never install dependencies."""
     on_progress({'message': '正在预加载 PyTorch 的 CUDA/cuDNN 动态库…'})
@@ -59,10 +75,10 @@ def run_in_environment(options, environment_name, control, on_progress, scan_onl
 
     def controls():
         while not finished.wait(.1):
-            state = (control.paused.is_set(), control.stopped.is_set())
+            state = control_state(control)
             try:
                 temporary = control_path.with_suffix('.tmp')
-                temporary.write_text(json.dumps({'paused': state[0], 'stopped': state[1]}), encoding='utf-8')
+                temporary.write_text(json.dumps(state), encoding='utf-8')
                 os.replace(temporary, control_path)
             except OSError:
                 continue
@@ -107,7 +123,7 @@ def main():
         print(PREFIX + json.dumps({'type': kind, 'data': data}, ensure_ascii=False), flush=True)
 
     request = json.loads(sys.stdin.readline())
-    control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
+    control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event(), export_on_stop=threading.Event())
     control_path = Path(request['control_path'])
 
     def controls():
@@ -116,7 +132,7 @@ def main():
             try:
                 state = json.loads(control_path.read_text(encoding='utf-8'))
                 started = time.time()
-                (control.paused.set if state.get('paused') else control.paused.clear)()
+                apply_control_state(control, state)
                 if state.get('stopped') or time.time() - control_path.stat().st_mtime > 60:
                     control.stopped.set()
                     control.paused.clear()

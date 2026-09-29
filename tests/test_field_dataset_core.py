@@ -56,6 +56,52 @@ def test_stop_before_decode(tmp_path, fake_models):
     assert result['stopped'] and fake_models.calls == 0
 
 
+@pytest.mark.parametrize('with_export', [False, True])
+def test_stop_after_current_image_and_export_then_resume(tmp_path, fake_models, monkeypatch, with_export):
+    from pathlib import Path
+    source = source_image(tmp_path)
+    cv2.imwrite(str(source / 'second_top.png'), np.zeros((12, 12, 3), np.uint8))
+    control = types.SimpleNamespace(paused=threading.Event(), stopped=threading.Event(),
+                                    export_on_stop=threading.Event())
+    original_generate = fake_models.generate
+    def generate(self, image, selected, **kwargs):
+        result = original_generate(self, image, selected, **kwargs)
+        if with_export:
+            control.export_on_stop.set()
+        control.stopped.set()
+        return result
+    monkeypatch.setattr(fake_models, 'generate', generate)
+    args = dict(source=source, output=tmp_path / 'out', product='D01-R',
+                selected=['roi_detector', 'tail_roi_detector'])
+    events = []
+    result = core.run(**args, control=control, on_progress=events.append, export_scope='history')
+    assert result['stopped'] and result['visited_images'] == 1
+    assert result['completed_model_jobs'] == 2
+    assert ('export' in result) == with_export
+    if with_export:
+        assert result['export']['samples'] == 2
+        assert result['export']['run_id'] == result['run_id']
+        assert result['export']['scope'] == 'current'
+        assert (Path(result['export']['directory']) / 'preview').is_dir()
+        assert any(event.get('phase') == 'export' for event in events)
+        assert json.loads((tmp_path / 'out/summary.json').read_text())['stop_export_requested']
+    monkeypatch.setattr(fake_models, 'generate', original_generate)
+    resumed = core.run(**args)
+    assert resumed['skipped_model_jobs'] == 2
+    assert resumed['completed_model_jobs'] == 2
+    assert resumed['export']['samples'] == 4
+
+
+def test_stop_export_before_first_image_has_no_fake_export(tmp_path, fake_models):
+    control = types.SimpleNamespace(paused=threading.Event(), stopped=threading.Event(),
+                                    export_on_stop=threading.Event())
+    control.stopped.set()
+    control.export_on_stop.set()
+    result = core.run(source_image(tmp_path), tmp_path / 'out', 'D01-R', ['roi_detector'], control=control)
+    assert result['stop_export_requested'] and not result.get('export')
+    assert fake_models.calls == 0
+
+
 def test_export_excludes_previous_version_and_other_source(tmp_path, fake_models):
     source = source_image(tmp_path)
     output = tmp_path / 'output'

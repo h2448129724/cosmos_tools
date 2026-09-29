@@ -335,11 +335,19 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
                 stream.write(json.dumps({'source': src, 'model': model, 'status': status,
                                          'details': json.loads(details)}, ensure_ascii=False) + '\n')
         os.replace(temp, output / 'manifest.jsonl')
-        if rows and not summary['stopped']:
+        export_event = getattr(control, 'export_on_stop', None)
+        stop_export = bool(summary['stopped'] and export_event and export_event.is_set())
+        summary['stop_export_requested'] = stop_export
+        if rows and (not summary['stopped'] or stop_export):
             from .field_dataset_export import export
-            summary['export'] = export(output, selected, source=source, scope=export_scope,
-                                       run_id=run_id if export_scope == 'current' else None)
-            _json(output / 'summary.json', summary)
+            # Early-stop exports never mix unrelated historical runs into the partial dataset.
+            scope = 'current' if stop_export else export_scope
+            if on_progress:
+                on_progress({'phase': 'export', 'message': '正在导出本次已完成数据（含标签、preview 和报告），请等待…'
+                             if stop_export else '正在生成数据集导出与 preview，请等待…'})
+            summary['export'] = export(output, selected, source=source, scope=scope,
+                                       run_id=run_id if scope == 'current' else None)
+        _json(output / 'summary.json', summary)
         return summary
     finally:
         db.close()

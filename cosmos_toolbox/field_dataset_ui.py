@@ -101,7 +101,8 @@ class FieldDatasetPage(QWidget):
         self.setProperty("ownsPageHeader", True)
         self.setWindowTitle("CAB-F 现场数据集生成")
         self.worker = None
-        self.control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
+        self.control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event(),
+                                       export_on_stop=threading.Event())
         self._closing_window = None
         layout = QVBoxLayout(self)
         title = QLabel("CAB-F 现场数据集生成")
@@ -229,8 +230,10 @@ class FieldDatasetPage(QWidget):
         self.preview_button = QPushButton("试跑前 2 张")
         self.pause_button = QPushButton("暂停")
         self.stop_button = QPushButton("安全停止")
+        self.stop_export_button = QPushButton("停止并导出")
+        self.stop_export_button.setToolTip('完成当前原图后停止后续处理，导出本次已完成的数据；不再启动后续文件夹。')
         self.open_button = QPushButton("打开输出目录")
-        for index, button in enumerate((self.scan_button, self.preview_button, self.start_button, self.pause_button, self.stop_button, self.open_button)):
+        for index, button in enumerate((self.scan_button, self.preview_button, self.start_button, self.pause_button, self.stop_button, self.stop_export_button, self.open_button)):
             actions.addWidget(button, index // 3, index % 3)
         self.start_button.setProperty('buttonRole', 'primary')
         layout.addLayout(actions)
@@ -239,6 +242,7 @@ class FieldDatasetPage(QWidget):
         self.preview_button.clicked.connect(self._preview_run)
         self.pause_button.clicked.connect(self._toggle_pause)
         self.stop_button.clicked.connect(self._stop)
+        self.stop_export_button.clicked.connect(self._stop_and_export)
         self.open_button.clicked.connect(self._open_output)
         self.status = QLabel("请选择文件夹和模型；可先限制处理数量进行试运行。")
         self.status.setWordWrap(True)
@@ -468,6 +472,7 @@ class FieldDatasetPage(QWidget):
             return
         self.control.paused.clear()
         self.control.stopped.clear()
+        self.control.export_on_stop.clear()
         config_path = self.product_config.text().strip()
         try:
             product = configured_product(config_path)
@@ -515,6 +520,7 @@ class FieldDatasetPage(QWidget):
         self.load_preview_button.setEnabled(not busy)
         self.pause_button.setEnabled(busy and not scan_only)
         self.stop_button.setEnabled(busy and not scan_only)
+        self.stop_export_button.setEnabled(busy and not scan_only)
 
     def _toggle_pause(self):
         if self.control.paused.is_set():
@@ -528,6 +534,10 @@ class FieldDatasetPage(QWidget):
         if getattr(self, '_task_bridge', None):
             self._task_bridge.note(self.status.text())
 
+    def _stop_and_export(self):
+        self.control.export_on_stop.set()
+        self._stop()
+
     def _stop(self):
         bridge = getattr(self, '_task_bridge', None)
         if bridge and bridge.center.cancel(bridge.task_id):
@@ -536,7 +546,10 @@ class FieldDatasetPage(QWidget):
         self.control.paused.clear()
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
-        self.status.setText("已请求停止，正在完成当前安全处理点并保存进度…")
+        self.stop_export_button.setEnabled(False)
+        self.status.setText("已请求停止并导出：正在完成当前原图，随后导出本次已完成数据，请勿关闭程序…"
+                            if self.control.export_on_stop.is_set() else
+                            "已请求停止，正在完成当前安全处理点并保存进度…")
 
     def _on_progress(self, data):
         total = data.get("total", 0)
@@ -552,7 +565,7 @@ class FieldDatasetPage(QWidget):
                        f"断点跳过 {data.get('skipped', 0)}")
         message = message or json.dumps(data, ensure_ascii=False, default=str)
         self.log.appendPlainText(str(message))
-        if not self.control.paused.is_set() and not self.control.stopped.is_set():
+        if data.get('phase') == 'export' or (not self.control.paused.is_set() and not self.control.stopped.is_set()):
             self.status.setText(str(message))
 
     def _on_result(self, result):
@@ -579,6 +592,14 @@ class FieldDatasetPage(QWidget):
                 f"{title}：本次模型任务完成 {total('completed_model_jobs')}，OK 过滤 {total('filtered_model_jobs')}，"
                 f"未启用 {total('not_applicable_model_jobs')}，需复核 {total('review_model_jobs')}，"
                 f"技术失败 {failures}，断点跳过 {total('skipped_model_jobs')}；文件夹异常 {folder_errors}。")
+            exported = [run['export'] for run in runs if run.get('export')]
+            if self.control.export_on_stop.is_set():
+                export_errors = sum(len(item.get('errors') or []) + len(item.get('preview_errors') or []) for item in exported)
+                detail = (f' 已生成 {len(exported)} 个导出目录，导出/预览错误 {export_errors}。' if exported else
+                          ' 未生成导出目录：请检查是否尚无已完成样本或运行发生异常。')
+                self.status.setText(self.status.text() + detail)
+                for item in exported:
+                    self.log.appendPlainText('导出目录：' + str(item.get('directory', '')))
             merged = {}
             for run in runs:
                 for name, counts in run.get('models', {}).items():
