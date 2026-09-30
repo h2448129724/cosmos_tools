@@ -79,6 +79,9 @@ class DatasetWorker(QThread):
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
     def _run_one(self, options):
+        options = dict(options)
+        if not self.scan_only:
+            options['task_environment'] = self.environment_name
         if self.environment_name:
             from .field_dataset_runtime import run_in_environment
             return run_in_environment(options, self.environment_name, self.control,
@@ -104,6 +107,7 @@ class FieldDatasetPage(QWidget):
         self.control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event(),
                                        export_on_stop=threading.Event())
         self._closing_window = None
+        self._resume_record = None
         layout = QVBoxLayout(self)
         title = QLabel("CAB-F 现场数据集生成")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
@@ -135,6 +139,25 @@ class FieldDatasetPage(QWidget):
         source_layout.addWidget(add_sources)
         form.addRow("原图文件夹列表", source_row)
         form.addRow("输出文件夹", self._folder_row(self.output))
+        self.history_combo = QComboBox()
+        self.history_combo.setMinimumContentsLength(20)
+        self.history_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        form.addRow('历史任务', self.history_combo)
+        history_actions = QWidget()
+        from .ui.primitives import ActionBar
+        history_bar = QVBoxLayout(history_actions)
+        history_bar.setContentsMargins(0, 0, 0, 0)
+        actions_bar = ActionBar()
+        history_bar.addWidget(actions_bar)
+        refresh_history = QPushButton('读取输出目录历史')
+        restore_history = QPushButton('恢复选中任务')
+        new_task = QPushButton('退出续跑 / 新任务')
+        for button in (refresh_history, restore_history, new_task):
+            actions_bar.add_widget(button)
+        refresh_history.clicked.connect(self._load_history)
+        restore_history.clicked.connect(self._restore_history)
+        new_task.clicked.connect(self._new_task)
+        form.addRow(history_actions)
         self.environment = QComboBox()
         self.environment.setEditable(True)
         self.environment.addItem('onnx-gpu')
@@ -497,6 +520,25 @@ class FieldDatasetPage(QWidget):
         if not environment_name:
             QMessageBox.warning(self, 'Conda 环境', '请选择或输入执行环境名称。')
             return
+        if not scan_only and self._resume_record:
+            from .field_history import validate_options
+            try:
+                if len(sources) != 1:
+                    raise ValueError('历史任务按单个来源工作区续跑，请勿添加其他原图目录')
+                validate_options(self._resume_record, {**options, 'source': sources[0]})
+            except ValueError as exc:
+                QMessageBox.warning(self, '未开始续跑', str(exc))
+                return
+            options['resume_from'] = self._resume_record['path']
+        elif not scan_only and Path(output).is_dir():
+            from .field_history import discover
+            history, history_errors = discover(output)
+            existing_ledger = any(Path(output).glob('run.db')) or any(Path(output).glob('*/run.db')) or any(Path(output).glob('*/*/run.db'))
+            if (history or history_errors or existing_ledger) and QMessageBox.question(self, '输出目录包含历史任务',
+                    '当前未选择历史任务续跑。建议先读取历史并恢复设置。\n仍按当前设置启动任务吗？旧记录不会删除。',
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
         self.worker = DatasetWorker(options, self.control, scan_only, self, environment_name=environment_name)
         self.worker.progress.connect(self._on_progress)
         self.worker.result.connect(self._on_result)
@@ -510,6 +552,59 @@ class FieldDatasetPage(QWidget):
         from .worker_task_bridge import bind_worker_task
         bind_worker_task(self, '现场数据集：扫描' if scan_only else '现场数据集：生成', 'cabf.field_dataset')
         self.worker.start()
+
+    def _load_history(self):
+        from .field_history import discover
+        if not self.output.text().strip():
+            QMessageBox.warning(self, '历史任务', '请先选择上次的输出目录。')
+            return
+        self.history_combo.clear()
+        records, errors = discover(self.output.text().strip())
+        for record in records:
+            data, counts = record['data'], record['counts']
+            label = (f"{data['run_id']} | {Path(data['source']).name} | {data['product']} | "
+                     f"{len(data['selected'])} 模型 | 完成 {counts.get('complete', 0)} / 失败 {counts.get('failed', 0)}")
+            self.history_combo.addItem(label, record)
+            self.history_combo.setItemData(self.history_combo.count()-1, record['path'], Qt.ItemDataRole.ToolTipRole)
+        self.status.setText(f'找到 {len(records)} 个历史任务；选择一项并恢复设置。记录数量不代表文件完整性，启动时会再次检查。')
+        for error in errors:
+            self.log.appendPlainText('历史记录读取失败：' + error)
+
+    def _restore_history(self):
+        record = self.history_combo.currentData()
+        if not record:
+            QMessageBox.warning(self, '历史任务', '请先读取历史并选择一个任务。')
+            return
+        if record['missing'] and QMessageBox.question(self, '旧版设置不完整',
+                '旧任务未记录正反面或数量上限，无法自动还原。\n将暂填“全部正反面、数量不限”，请确认后按实际情况调整。\n'
+                '其余模型/配置会恢复；开始时仍严格检查算法兼容性。是否恢复？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self._restore_record(record)
+
+    def _restore_record(self, record):
+        options = record['options']
+        self.source.setPlainText(options['source'])
+        self.output.setText(options['output'])
+        self.product_config.setText(options.get('product_config') or '')
+        for combo, key in ((self.face, 'face'), (self.mode, 'mode'), (self.export_scope, 'export_scope')):
+            combo.setCurrentIndex(combo.findData(options[key]))
+        self.limit.setValue(options.get('limit') or 0)
+        self.ng_only.setChecked(options['ng_only'])
+        for key, check in self.checks.items():
+            check.setChecked(key in options['selected'])
+        environment = record['data'].get('environment')
+        if environment:
+            self.environment.setCurrentText(environment)
+        self._resume_record = record
+        self.start_button.setText('继续此任务')
+        self.status.setText('已恢复历史设置；点击“继续此任务”将先检查兼容性，再复用完整结果。')
+
+    def _new_task(self):
+        self._resume_record = None
+        self.start_button.setText('开始生成')
+        self.status.setText('已退出续跑模式，当前设置保留；旧任务不会删除。')
 
     def _set_busy(self, busy, scan_only=False):
         self.settings.setEnabled(not busy)

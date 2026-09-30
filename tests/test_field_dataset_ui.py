@@ -204,7 +204,7 @@ class FieldDatasetUiTest(unittest.TestCase):
         worker.result.connect(received.append)
         with patch('cosmos_toolbox.field_dataset_runtime.run_in_environment', return_value={'samples': 1}) as runner:
             worker.run()
-        self.assertEqual(runner.call_args.args[:3], (options, 'custom-gpu', control))
+        self.assertEqual(runner.call_args.args[:3], ({**options, 'task_environment': 'custom-gpu'}, 'custom-gpu', control))
         self.assertEqual(received, [{'samples': 1}])
 
     def test_missing_environment_does_not_fall_back(self):

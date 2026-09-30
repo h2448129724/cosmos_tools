@@ -109,7 +109,7 @@ def _save_sample(folder, sample, identity, model, mode):
 
 
 def run(source, output, product, selected, face='all', mode='auto', limit=None, control=None, on_progress=None,
-        product_config=None, ng_only=False, export_scope='current'):
+        product_config=None, ng_only=False, export_scope='current', resume_from=None, task_environment=None):
     from .paths import ensure_import_paths
     ensure_import_paths()
     import cv2
@@ -123,6 +123,14 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
     if not selected or set(selected) - MODEL_IDS.keys():
         raise ValueError('请选择有效模型')
     source, output = Path(source).resolve(), Path(output).resolve()
+    options = dict(source=str(source), output=str(output), product=product, selected=selected,
+                   face=face, mode=mode, limit=limit, product_config=str(Path(product_config).resolve()) if product_config else None,
+                   ng_only=ng_only, export_scope=export_scope)
+    previous = None
+    if resume_from:
+        from .field_history import read_run, validate_options
+        previous = read_run(resume_from)
+        validate_options(previous, options)
     if source == output or source in output.parents or output in source.parents:
         raise ValueError('输入与输出目录不能互相包含')
     if ng_only:
@@ -170,10 +178,20 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
             snapshot = {**snapshot, 'ng_only': True,
                         'ng_gate_sha256': hashlib.sha256(Path(field_dataset_ng.__file__).read_bytes()).hexdigest()}
         version = hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode()).hexdigest()[:12]
+        actual_version = version
+        if previous:
+            from .field_history import validate_snapshot
+            validate_snapshot(previous['data']['models'], snapshot)
+            # Keep the prior namespace: committed files/annotations are never renamed or overwritten.
+            version = previous['data']['version']
+            if on_progress:
+                on_progress({'message': f"续跑兼容检查通过：{previous['data']['run_id']}；将校验并复用完整结果。"})
         timings = {'decode_seconds': 0., 'ng_seconds': 0., 'generate_seconds': 0.,
                    'prediction_cache_hits': 0, 'prediction_cache_misses': 0, 'calibration_reused': 0}
         _json(output / 'runs' / f'{run_id}.json', {'run_id': run_id, 'product': product, 'selected': selected,
-              'mode': mode, 'ng_only': ng_only, 'source': str(source), 'models': snapshot, 'version': version})
+              'mode': mode, 'ng_only': ng_only, 'source': str(source), 'models': snapshot, 'version': version,
+              'actual_version': actual_version, 'options': options, 'environment': task_environment,
+              'resumed_from': previous['data']['run_id'] if previous else None})
         for index, path in enumerate(paths):
             if shutil.disk_usage(output).free < 2 * 1024**3:
                 raise RuntimeError('输出磁盘可用空间不足 2 GiB，已提交进度保存在 run.db')

@@ -56,6 +56,72 @@ def test_stop_before_decode(tmp_path, fake_models):
     assert result['stopped'] and fake_models.calls == 0
 
 
+def test_history_restore_exact_settings_and_resume(tmp_path, fake_models):
+    from cosmos_toolbox.field_history import discover, validate_options
+    source = source_image(tmp_path)
+    output = tmp_path / 'out'
+    args = dict(source=source, output=output, product='D01-R', selected=['roi_detector'], face='top', limit=1)
+    first = core.run(**args, task_environment='onnx-gpu')
+    records, errors = discover(output)
+    assert not errors and len(records) == 1
+    record = records[0]
+    assert record['counts']['complete'] == 1
+    assert record['options']['face'] == 'top' and record['options']['limit'] == 1
+    assert record['data']['environment'] == 'onnx-gpu'
+    assert not record['missing']
+    second = core.run(**args, resume_from=record['path'])
+    assert second['skipped_model_jobs'] == 1
+    assert second['completed_model_jobs'] == 0
+    assert second['export']['samples'] == 1
+    assert fake_models.calls == 1
+    with pytest.raises(ValueError, match='范围不一致'):
+        validate_options(record, {**record['options'], 'face': 'all'})
+
+
+@pytest.mark.parametrize('change', ['mode', 'snapshot', 'source_code'])
+def test_resume_mismatch_keeps_ledger_and_samples(tmp_path, fake_models, change):
+    from cosmos_toolbox.field_history import discover
+    import sqlite3
+    args = dict(source=source_image(tmp_path), output=tmp_path/'out', product='D01-R', selected=['roi_detector'])
+    first = core.run(**args)
+    record = discover(args['output'])[0][0]
+    with sqlite3.connect(args['output']/'run.db') as db:
+        before = db.execute('SELECT * FROM items').fetchall()
+    if change == 'mode':
+        args['mode'] = 'images'
+    elif change == 'snapshot':
+        fake_models.snapshot = {'model': 'changed-weights'}
+    else:
+        data = record['data']
+        data['models']['tool_sources']['field_dataset.py'] = 'unknown-core-change'
+        core._json(__import__('pathlib').Path(record['path']), data)
+    with pytest.raises(ValueError, match='不一致|不兼容'):
+        core.run(**args, resume_from=record['path'])
+    assert fake_models.calls == 1
+    with sqlite3.connect(args['output']/'run.db') as db:
+        assert db.execute('SELECT * FROM items').fetchall() == before
+    assert len(list((args['output']/'runs').glob('*.json'))) == 1
+
+
+def test_audited_legacy_resume_reuses_old_namespace(tmp_path, fake_models):
+    from pathlib import Path
+    from cosmos_toolbox.field_history import discover
+    source = source_image(tmp_path)
+    args = dict(source=source, output=tmp_path/'out', product='D01-R', selected=['roi_detector'])
+    first = core.run(**args)
+    record = discover(args['output'])[0][0]
+    data = record['data']
+    data.pop('options')
+    data['models']['tool_sources'].pop('field_history.py')
+    data['models']['tool_sources']['field_dataset.py'] = '04fef46d0b89965a69a4f02882b4c006c5507ff796ed85fa029a299082b968bc'
+    core._json(Path(record['path']), data)
+    assert discover(args['output'])[0][0]['missing'] == ['face', 'limit']
+    cv2.imwrite(str(source/'second_top.png'), np.zeros((12, 12, 3), np.uint8))
+    result = core.run(**args, resume_from=record['path'])
+    assert result['skipped_model_jobs'] == 1 and result['completed_model_jobs'] == 1
+    assert result['export']['samples'] == 2
+
+
 @pytest.mark.parametrize('with_export', [False, True])
 def test_stop_after_current_image_and_export_then_resume(tmp_path, fake_models, monkeypatch, with_export):
     from pathlib import Path
