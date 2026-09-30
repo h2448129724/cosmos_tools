@@ -187,3 +187,65 @@ def discover_batches(root):
         except Exception as exc:
             errors.append(f'{path}: {exc}')
     return records, errors
+
+
+def export_history_jobs(jobs, control, on_progress):
+    """Export only committed run-scoped samples; never load models or rewrite run state."""
+    import msvcrt
+    from .field_dataset_export import export
+    validate_jobs(jobs)
+    results, errors, skipped = [], [], []
+    for index, job in enumerate(jobs):
+        while control.paused.is_set() and not control.stopped.wait(.1):
+            pass
+        if control.stopped.is_set():
+            break
+        options = job['options']
+        source = options['source']
+        on_progress({'phase': 'export', 'current': index, 'total': len(jobs),
+                     'message': f'仅导出历史 {index + 1}/{len(jobs)}：{source}（不加载模型）'})
+        try:
+            run_path = options.get('resume_from')
+            if not run_path:
+                skipped.append({'source': source, 'reason': '任务尚未产生运行记录，无已完成数据可导出'})
+                continue
+            record = read_run(run_path)
+            workspace = Path(record['workspace'])
+            if workspace != workspace_for(options):
+                raise ValueError('历史快照与工作区不一致')
+            # Same OS lock as generation: reject concurrent mutation of this workspace.
+            with (workspace / '.running.lock').open('a+b') as lock:
+                if lock.tell() == 0:
+                    lock.write(b'0')
+                    lock.flush()
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    raise RuntimeError('该工作区正在生成或导出，请任务结束后再试') from exc
+                try:
+                    data = record['data']
+                    with sqlite3.connect((workspace / 'run.db').as_uri() + '?mode=ro', uri=True) as db:
+                        models = [row[0] for row in db.execute(
+                            "SELECT model FROM items JOIN run_items ON key=item_key WHERE run_id=? AND status='complete'",
+                            (data['run_id'],))]
+                    if not any(model in data['selected'] for model in models):
+                        skipped.append({'source': source, 'reason': '选中运行没有已完成模型结果'})
+                        continue
+                    report = export(workspace, data['selected'], source=data['source'], run_id=data['run_id'], scope='current')
+                    results.append({'source': data['source'], 'output': str(workspace),
+                                    'run_id': data['run_id'], 'export': report})
+                    on_progress({'phase': 'export', 'message': f"导出目录：{report['directory']}；样本 {report['samples']}"})
+                finally:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception as exc:
+            errors.append({'source': source, 'error': f'{type(exc).__name__}: {exc}'})
+            on_progress({'phase': 'export', 'message': f'导出失败：{source}：{exc}'})
+        finally:
+            on_progress({'current': index + 1, 'total': len(jobs),
+                         'message': f'历史导出进度 {index + 1}/{len(jobs)}'})
+    for item in skipped:
+        on_progress({'message': f"跳过：{item['source']}：{item['reason']}"})
+    return {'batch': True, 'export_only': True, 'results': results, 'errors': errors,
+            'skipped_exports': skipped, 'stopped': control.stopped.is_set()}

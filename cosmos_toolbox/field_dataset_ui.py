@@ -46,6 +46,10 @@ class DatasetWorker(QThread):
 
     def run(self):
         try:
+            if self.options.get('export_only'):
+                from .field_history import export_history_jobs
+                self.result.emit(export_history_jobs(self.options['jobs'], self.control, self.progress.emit))
+                return
             if not self.scan_only and ('jobs' in self.options or 'sources' in self.options):
                 self._run_batch()
                 return
@@ -212,11 +216,14 @@ class FieldDatasetPage(QWidget):
         restore_history = QPushButton('恢复选中任务')
         new_task = QPushButton('退出续跑 / 新任务')
         select_all = QPushButton('全选')
-        for button in (refresh_history, restore_history, select_all, new_task):
+        self.export_history_button = QPushButton('仅导出已完成结果')
+        self.export_history_button.setToolTip('按选中历史任务导出裁片、标签、preview 和报告；不加载模型，不继续处理原图。')
+        for button in (refresh_history, restore_history, self.export_history_button, select_all, new_task):
             actions_bar.add_widget(button)
         refresh_history.clicked.connect(self._load_history)
         restore_history.clicked.connect(self._restore_history)
         select_all.clicked.connect(self.history_list.selectAll)
+        self.export_history_button.clicked.connect(self._export_history)
         new_task.clicked.connect(self._new_task)
         form.addRow(history_actions)
         self.environment = QComboBox()
@@ -621,12 +628,41 @@ class FieldDatasetPage(QWidget):
         self.worker.finished.connect(self._finished)
         self._set_busy(True, scan_only)
         self.progress_bar.setRange(0, 0)
-        self.status.setText("正在扫描图片…" if scan_only else "正在准备模型与输出…")
+        self.status.setText('正在导出历史已完成结果（不加载模型）…' if options.get('export_only') else
+                            "正在扫描图片…" if scan_only else "正在准备模型与输出…")
         self.log.appendPlainText(self.status.text())
         self.tabs.setCurrentWidget(self.log)
         from .worker_task_bridge import bind_worker_task
-        bind_worker_task(self, '现场数据集：扫描' if scan_only else '现场数据集：生成', 'cabf.field_dataset')
+        bind_worker_task(self, '现场数据集：历史导出' if options.get('export_only') else
+                         '现场数据集：扫描' if scan_only else '现场数据集：生成', 'cabf.field_dataset')
         self.worker.start()
+
+    def _export_history(self):
+        if self.worker and self.worker.isRunning():
+            return
+        records = [item.data(Qt.ItemDataRole.UserRole) for item in self.history_list.selectedItems()]
+        if not records:
+            QMessageBox.warning(self, '历史导出', '请先读取历史并选择一个或多个任务，或一条整批清单。')
+            return
+        from .field_history import jobs_from_records
+        try:
+            jobs = jobs_from_records(records, None)
+        except Exception as exc:
+            QMessageBox.warning(self, '历史导出', str(exc))
+            return
+        if QMessageBox.question(self, '仅导出历史结果',
+                f'将检查 {len(jobs)} 个任务，仅导出所选运行已完成的数据。\n'
+                '不加载模型，不需要原图或当前 YAML，不继续生成数据。\n'
+                '各工作区新建 exports 目录下的导出，不覆盖旧导出；未开始或无完成结果的任务跳过。\n'
+                '暂停/停止在单个任务导出结束后生效。是否继续？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.control.paused.clear()
+        self.control.stopped.clear()
+        self.control.export_on_stop.clear()
+        self._launch_worker({'jobs': jobs, 'export_only': True,
+                             'sources': [job['options']['source'] for job in jobs]}, False, None)
 
     def _load_history(self):
         from .field_history import discover, discover_batches
@@ -739,6 +775,8 @@ class FieldDatasetPage(QWidget):
         self.pause_button.setEnabled(busy and not scan_only)
         self.stop_button.setEnabled(busy and not scan_only)
         self.stop_export_button.setEnabled(busy and not scan_only)
+        if busy and self.worker and self.worker.options.get('export_only'):
+            self.stop_export_button.setEnabled(False)
         if not busy and self._resume_jobs is not None:
             self._lock_batch_fields(True)
 
@@ -767,6 +805,9 @@ class FieldDatasetPage(QWidget):
         self.pause_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.stop_export_button.setEnabled(False)
+        if self.worker and self.worker.options.get('export_only'):
+            self.status.setText('已请求停止：当前历史任务导出完成后停止，不再导出后续任务，请勿关闭程序…')
+            return
         self.status.setText("已请求停止并导出：正在完成当前原图，随后导出本次已完成数据，请勿关闭程序…"
                             if self.control.export_on_stop.is_set() else
                             "已请求停止，正在完成当前安全处理点并保存进度…")
@@ -789,6 +830,21 @@ class FieldDatasetPage(QWidget):
             self.status.setText(str(message))
 
     def _on_result(self, result):
+        if result.get('export_only'):
+            reports = [run['export'] for run in result.get('results', [])]
+            failures = len(result.get('errors', [])) + sum(len(report.get('errors', [])) + len(report.get('preview_errors', [])) for report in reports)
+            self.status.setText(
+                f"历史导出{'已停止' if result.get('stopped') else '结束'}：生成 {len(reports)} 个导出目录，"
+                f"样本 {sum(report.get('samples', 0) for report in reports)}，"
+                f"跳过 {len(result.get('skipped_exports', []))} 个任务，错误 {failures}。")
+            self.log.appendPlainText(self.status.text())
+            for report in reports:
+                self.log.appendPlainText('导出目录：' + report['directory'])
+            self.log.appendPlainText(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            self.tabs.setCurrentWidget(self.log)
+            if self.progress_bar.maximum() == 0:
+                self.progress_bar.setRange(0, 1)
+            return
         self.progress_bar.setRange(0, 100)
         if result.get("scan"):
             self.status.setText(f"扫描到 {result['count']} 张图片，合计 {result['bytes'] / 1024 ** 3:.2f} GiB。损坏图片在解码时检测。")
@@ -841,6 +897,10 @@ class FieldDatasetPage(QWidget):
     def _finished(self):
         self._set_busy(False)
         self.pause_button.setText("暂停")
+        if self.worker and self.worker.options.get('export_only'):
+            # Keep the selected-run export report visible, not previews of a different latest run.
+            self.tabs.setCurrentWidget(self.log)
+            return
         if self.worker and not self.worker.scan_only:
             current_tab = self.tabs.currentWidget()
             self._load_previews()
