@@ -46,6 +46,9 @@ class DatasetWorker(QThread):
 
     def run(self):
         try:
+            if not self.scan_only and ('jobs' in self.options or 'sources' in self.options):
+                self._run_batch()
+                return
             if 'sources' not in self.options:
                 self.result.emit(self._run_one(self.options))
                 return
@@ -78,6 +81,59 @@ class DatasetWorker(QThread):
         except Exception as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
+    def _run_batch(self):
+        from .field_history import new_batch, workspace_for, config_hash, read_run, validate_options
+        from .field_dataset import _json
+        jobs = self.options.get('jobs')
+        if jobs is None:
+            base = dict(self.options)
+            sources = base.pop('sources')
+            if base.get('product_config'):
+                base['product'] = configured_product(base['product_config'])
+            jobs = []
+            for source in sources:
+                options = {**base, 'source': source}
+                if len(sources) > 1:
+                    suffix = hashlib.sha256(str(Path(source).resolve()).casefold().encode()).hexdigest()[:12]
+                    options['output'] = str(Path(base['output']) / f'{Path(source).name}_{suffix}')
+                jobs.append({'options': options, 'environment': self.environment_name})
+        path, batch = new_batch(self.options['output'], jobs)
+        self.progress.emit({'message': f'批次清单已保存（包含尚未开始的文件夹）：{path}'})
+        results, errors = [], []
+        for index, job in enumerate(batch['jobs']):
+            while self.control.paused.is_set() and not self.control.stopped.wait(.1):
+                pass
+            if self.control.stopped.is_set():
+                break
+            options = dict(job['options'])
+            source = options['source']
+            self.progress.emit({'message': f'文件夹 {index + 1}/{len(batch["jobs"])}：{source}'})
+            job['status'] = 'running'
+            job['known_runs'] = [p.name for p in (workspace_for(options) / 'runs').glob('*.json')]
+            _json(path, batch)
+            try:
+                if config_hash(options) != job['config_hash']:
+                    raise ValueError('配置文件与批次保存时不同，已拒绝此任务，旧数据保留')
+                if options.get('resume_from'):
+                    validate_options(read_run(options['resume_from']), options)
+                self.environment_name = job.get('environment')
+                result = {'source': source, **self._run_one(options)}
+                if result.get('stopped'):
+                    self.control.stopped.set()
+                results.append(result)
+                job['result'] = result
+                job['status'] = 'stopped' if result.get('stopped') or self.control.stopped.is_set() else 'complete'
+                if result.get('failed_model_jobs') or result.get('export', {}).get('errors') or result.get('export', {}).get('preview_errors'):
+                    job['status'] = 'failed'
+            except Exception as exc:
+                message = f'{type(exc).__name__}: {exc}'
+                job.update(status='failed', error=message)
+                errors.append({'source': source, 'error': message})
+                self.progress.emit({'message': f'文件夹失败：{source}：{message}；其余任务按各自设置继续。'})
+            _json(path, batch)
+        self.result.emit({'batch': True, 'results': results, 'errors': errors,
+                          'stopped': self.control.stopped.is_set(), 'batch_manifest': str(path)})
+
     def _run_one(self, options):
         options = dict(options)
         if not self.scan_only:
@@ -108,6 +164,7 @@ class FieldDatasetPage(QWidget):
                                        export_on_stop=threading.Event())
         self._closing_window = None
         self._resume_record = None
+        self._resume_jobs = None
         layout = QVBoxLayout(self)
         title = QLabel("CAB-F 现场数据集生成")
         title.setStyleSheet("font-size: 22px; font-weight: 600;")
@@ -139,10 +196,12 @@ class FieldDatasetPage(QWidget):
         source_layout.addWidget(add_sources)
         form.addRow("原图文件夹列表", source_row)
         form.addRow("输出文件夹", self._folder_row(self.output))
-        self.history_combo = QComboBox()
-        self.history_combo.setMinimumContentsLength(20)
-        self.history_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        form.addRow('历史任务', self.history_combo)
+        self.history_list = QListWidget()
+        self.history_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.history_list.setMinimumHeight(100)
+        self.history_list.setMaximumHeight(150)
+        self.history_list.setToolTip('Ctrl / Shift 多选；同一工作区只能选择一条记录，整批与单项不可重复选择。')
+        form.addRow('历史任务（多选）', self.history_list)
         history_actions = QWidget()
         from .ui.primitives import ActionBar
         history_bar = QVBoxLayout(history_actions)
@@ -152,10 +211,12 @@ class FieldDatasetPage(QWidget):
         refresh_history = QPushButton('读取输出目录历史')
         restore_history = QPushButton('恢复选中任务')
         new_task = QPushButton('退出续跑 / 新任务')
-        for button in (refresh_history, restore_history, new_task):
+        select_all = QPushButton('全选')
+        for button in (refresh_history, restore_history, select_all, new_task):
             actions_bar.add_widget(button)
         refresh_history.clicked.connect(self._load_history)
         restore_history.clicked.connect(self._restore_history)
+        select_all.clicked.connect(self.history_list.selectAll)
         new_task.clicked.connect(self._new_task)
         form.addRow(history_actions)
         self.environment = QComboBox()
@@ -483,6 +544,16 @@ class FieldDatasetPage(QWidget):
     def _start(self, scan_only=False):
         if self.worker and self.worker.isRunning():
             return
+        if self._resume_jobs is not None:
+            if scan_only:
+                QMessageBox.information(self, '批量续跑', '批量续跑按各任务自己的参数执行，请直接点击“继续选中任务”。')
+                return
+            self.control.paused.clear()
+            self.control.stopped.clear()
+            self.control.export_on_stop.clear()
+            self._launch_worker({'jobs': self._resume_jobs, 'output': self.output.text().strip(),
+                                 'sources': [job['options']['source'] for job in self._resume_jobs]}, False, None)
+            return
         sources = list(dict.fromkeys(str(Path(p.strip().strip('"')).resolve())
                                      for p in self.source.toPlainText().splitlines() if p.strip()))
         output = self.output.text().strip()
@@ -534,11 +605,15 @@ class FieldDatasetPage(QWidget):
             from .field_history import discover
             history, history_errors = discover(output)
             existing_ledger = any(Path(output).glob('run.db')) or any(Path(output).glob('*/run.db')) or any(Path(output).glob('*/*/run.db'))
-            if (history or history_errors or existing_ledger) and QMessageBox.question(self, '输出目录包含历史任务',
+            existing_batch = any((Path(output) / 'batches').glob('*.json'))
+            if (history or history_errors or existing_ledger or existing_batch) and QMessageBox.question(self, '输出目录包含历史任务',
                     '当前未选择历史任务续跑。建议先读取历史并恢复设置。\n仍按当前设置启动任务吗？旧记录不会删除。',
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
+        self._launch_worker(options, scan_only, environment_name)
+
+    def _launch_worker(self, options, scan_only, environment_name):
         self.worker = DatasetWorker(options, self.control, scan_only, self, environment_name=environment_name)
         self.worker.progress.connect(self._on_progress)
         self.worker.result.connect(self._on_result)
@@ -554,36 +629,72 @@ class FieldDatasetPage(QWidget):
         self.worker.start()
 
     def _load_history(self):
-        from .field_history import discover
+        from .field_history import discover, discover_batches
         if not self.output.text().strip():
             QMessageBox.warning(self, '历史任务', '请先选择上次的输出目录。')
             return
-        self.history_combo.clear()
+        self.history_list.clear()
         records, errors = discover(self.output.text().strip())
+        batches, batch_errors = discover_batches(self.output.text().strip())
+        for batch in batches:
+            statuses = batch['statuses']
+            label = (f"整批 {Path(batch['path']).stem} | {len(statuses)} 文件夹 | "
+                     f"完成 {statuses.count('complete')} / 待开始 {statuses.count('pending')} / 停止或异常 {sum(s in ('running', 'failed', 'stopped') for s in statuses)}")
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, batch)
+            item.setToolTip(batch['path'])
+            self.history_list.addItem(item)
         for record in records:
             data, counts = record['data'], record['counts']
             label = (f"{data['run_id']} | {Path(data['source']).name} | {data['product']} | "
                      f"{len(data['selected'])} 模型 | 完成 {counts.get('complete', 0)} / 失败 {counts.get('failed', 0)}")
-            self.history_combo.addItem(label, record)
-            self.history_combo.setItemData(self.history_combo.count()-1, record['path'], Qt.ItemDataRole.ToolTipRole)
-        self.status.setText(f'找到 {len(records)} 个历史任务；选择一项并恢复设置。记录数量不代表文件完整性，启动时会再次检查。')
-        for error in errors:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, record)
+            item.setToolTip(record['path'])
+            self.history_list.addItem(item)
+        self.status.setText(f'找到 {len(batches)} 个整批清单、{len(records)} 个单目录历史。可 Ctrl / Shift 多选；不要重复选择同一工作区。')
+        for error in errors + batch_errors:
             self.log.appendPlainText('历史记录读取失败：' + error)
 
     def _restore_history(self):
-        record = self.history_combo.currentData()
-        if not record:
+        records = [item.data(Qt.ItemDataRole.UserRole) for item in self.history_list.selectedItems()]
+        if not records:
             QMessageBox.warning(self, '历史任务', '请先读取历史并选择一个任务。')
             return
-        if record['missing'] and QMessageBox.question(self, '旧版设置不完整',
+        if any(record.get('missing') for record in records) and QMessageBox.question(self, '旧版设置不完整',
                 '旧任务未记录正反面或数量上限，无法自动还原。\n将暂填“全部正反面、数量不限”，请确认后按实际情况调整。\n'
                 '其余模型/配置会恢复；开始时仍严格检查算法兼容性。是否恢复？',
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
             return
-        self._restore_record(record)
+        if len(records) == 1 and records[0].get('kind') != 'batch':
+            self._restore_record(records[0])
+            return
+        from .field_history import jobs_from_records
+        try:
+            jobs = jobs_from_records(records, self.environment.currentText().strip())
+        except Exception as exc:
+            QMessageBox.warning(self, '无法恢复选择', str(exc))
+            return
+        detail = '\n'.join(f"{job['options']['source']} | {job['options'].get('product')} | "
+                           f"{job['options'].get('face')} | 上限 {job['options'].get('limit') or '不限'} | "
+                           f"环境 {job.get('environment') or '当前进程'}" for job in jobs)
+        if QMessageBox.question(self, '确认批量续跑',
+                f'将按各任务保存的配置依次运行（不是套用界面的一份配置）：\n{detail}\n'
+                '旧版缺失范围按已确认的全部/不限执行。完成任务会校验复用，不重新推理完整结果。是否恢复？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self._resume_record = None
+        self._resume_jobs = jobs
+        self.source.setPlainText('\n'.join(job['options']['source'] for job in jobs))
+        self.start_button.setText(f'继续选中任务（{len(jobs)}）')
+        self._lock_batch_fields(True)
+        self.status.setText(f'已恢复 {len(jobs)} 个任务；配置按任务分别保存，开始后逐个校验。退出续跑后可修改设置。')
 
     def _restore_record(self, record):
+        self._resume_jobs = None
+        self._lock_batch_fields(False)
         options = record['options']
         self.source.setPlainText(options['source'])
         self.output.setText(options['output'])
@@ -603,8 +714,20 @@ class FieldDatasetPage(QWidget):
 
     def _new_task(self):
         self._resume_record = None
+        self._resume_jobs = None
+        self._lock_batch_fields(False)
         self.start_button.setText('开始生成')
         self.status.setText('已退出续跑模式，当前设置保留；旧任务不会删除。')
+
+    def _lock_batch_fields(self, locked):
+        for widget in (self.source, self.output, self.environment, self.product_config):
+            parent = widget.parentWidget()
+            if parent is not None and parent is not self.settings:
+                for button in parent.findChildren(QPushButton):
+                    button.setEnabled(not locked)
+        for widget in (self.source, self.output, self.environment, self.product_config, self.face,
+                       self.mode, self.limit, self.ng_only, self.export_scope, self.models_group):
+            widget.setEnabled(not locked)
 
     def _set_busy(self, busy, scan_only=False):
         self.settings.setEnabled(not busy)
@@ -616,6 +739,8 @@ class FieldDatasetPage(QWidget):
         self.pause_button.setEnabled(busy and not scan_only)
         self.stop_button.setEnabled(busy and not scan_only)
         self.stop_export_button.setEnabled(busy and not scan_only)
+        if not busy and self._resume_jobs is not None:
+            self._lock_batch_fields(True)
 
     def _toggle_pause(self):
         if self.control.paused.is_set():

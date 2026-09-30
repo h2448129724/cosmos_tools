@@ -89,8 +89,10 @@ class FieldDatasetUiTest(unittest.TestCase):
             self.assertFalse(received[0]['errors'])
 
     def test_batch_stops_before_next_folder(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
         control = SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
-        worker = DatasetWorker(dict(sources=['a', 'b'], output='out'), control)
+        worker = DatasetWorker(dict(sources=['a', 'b'], output=directory.name), control)
         def run_one(options):
             control.stopped.set()
             return {'stopped': True}

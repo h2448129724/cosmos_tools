@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
+import copy
+import time
 from pathlib import Path
 
 # Only audited control/UI-only migrations may bypass a core file hash change.
@@ -100,3 +103,87 @@ def validate_snapshot(previous, current):
         if name == 'field_dataset.py' and (old_tools.get(name), new_tools.get(name)) in COMPATIBLE_CORE_PAIRS:
             continue
         raise ValueError(f'生成源码不兼容：{name}；旧任务保留，未开始处理图片')
+
+
+def workspace_for(options):
+    root = Path(options['output']).resolve()
+    return root / 'ng_only' if options.get('ng_only') else root
+
+
+def validate_jobs(jobs):
+    seen = set()
+    for job in jobs:
+        key = str(workspace_for(job['options'])).casefold()
+        if key in seen:
+            raise ValueError('同一工作区只能选择一个历史任务；请取消重复运行记录或重叠批次')
+        seen.add(key)
+    if not jobs:
+        raise ValueError('没有可恢复的任务')
+
+
+def jobs_from_records(records, environment):
+    jobs = []
+    for record in records:
+        if record.get('kind') == 'batch':
+            jobs.extend(read_batch(record['path'])['jobs'])
+        else:
+            jobs.append({'options': {**record['options'], 'resume_from': record['path']},
+                         'environment': record['data'].get('environment') or environment,
+                         'status': 'pending'})
+    validate_jobs(jobs)
+    return jobs
+
+
+def config_hash(options):
+    path = options.get('product_config')
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).is_file() else None
+
+
+def new_batch(output, jobs):
+    from .field_dataset import _json
+    validate_jobs(jobs)
+    path = Path(output).resolve() / 'batches' / f'{time.time_ns()}.json'
+    document = {'schema': 1, 'jobs': copy.deepcopy(jobs)}
+    for job in document['jobs']:
+        job.setdefault('config_hash', config_hash(job['options']))
+        job['status'] = 'pending'
+        job.pop('error', None)
+        job.pop('result', None)
+        job.pop('known_runs', None)
+    _json(path, document)
+    return path, document
+
+
+def read_batch(path):
+    path = Path(path).resolve(strict=True)
+    document = json.loads(path.read_text(encoding='utf-8'))
+    if document.get('schema') != 1 or not isinstance(document.get('jobs'), list):
+        raise ValueError('无效批次清单')
+    jobs = copy.deepcopy(document['jobs'])
+    for job in jobs:
+        options = job['options']
+        if job.get('result', {}).get('run_id'):
+            options['resume_from'] = str(workspace_for(options) / 'runs' / (job['result']['run_id'] + '.json'))
+        elif job.get('status') in ('running', 'failed', 'stopped') and 'known_runs' in job:
+            # Recover a run created before a crash/result delivery failure. Never guess among unrelated runs.
+            candidates = sorted((workspace_for(options) / 'runs').glob('*.json'))
+            candidates = [p for p in candidates if p.name not in job['known_runs']]
+            if len(candidates) > 1:
+                raise ValueError(f"{options['source']} 有多个未关联运行，请改选单独历史记录")
+            if candidates:
+                record = read_run(candidates[0])
+                validate_options(record, options)
+                options['resume_from'] = str(candidates[0])
+    validate_jobs(jobs)
+    return {'kind': 'batch', 'path': str(path), 'jobs': jobs,
+            'statuses': [job.get('status', 'pending') for job in jobs]}
+
+
+def discover_batches(root):
+    records, errors = [], []
+    for path in sorted((Path(root) / 'batches').glob('*.json'), reverse=True):
+        try:
+            records.append(read_batch(path))
+        except Exception as exc:
+            errors.append(f'{path}: {exc}')
+    return records, errors

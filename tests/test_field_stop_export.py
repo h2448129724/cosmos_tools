@@ -48,10 +48,10 @@ def test_button_unpauses_and_reports_export():
     page.close()
 
 
-def test_batch_does_not_start_next_folder_after_stop_export():
+def test_batch_does_not_start_next_folder_after_stop_export(tmp_path):
     app = QApplication.instance() or QApplication([])
     state = control()
-    worker = DatasetWorker({'sources': ['one', 'two'], 'output': 'out'}, state)
+    worker = DatasetWorker({'sources': ['one', 'two'], 'output': str(tmp_path/'out')}, state)
     calls, results = [], []
     def run_one(options):
         calls.append(options['source'])
