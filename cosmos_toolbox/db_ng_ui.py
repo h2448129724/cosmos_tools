@@ -10,14 +10,16 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QEvent, QThread, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QThread, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDateEdit,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -38,6 +40,72 @@ from .paths import COSMOS_ROOT
 
 def _new_control():
     return SimpleNamespace(paused=threading.Event(), stopped=threading.Event())
+
+
+def _exclusive_next_day(value):
+    """Convert an inclusive calendar date into the scan API's exclusive end."""
+    if not value:
+        return ""
+    return (date.fromisoformat(value) + timedelta(days=1)).isoformat()
+
+
+class _CalendarDateEdit(QDateEdit):
+    """Date field changed from the calendar, not by typing a timestamp."""
+
+    _PASSTHROUGH_KEYS = frozenset({Qt.Key.Key_Tab, Qt.Key.Key_Backtab, Qt.Key.Key_Escape})
+
+    def __init__(self, parent=None):
+        super().__init__(QDate.currentDate(), parent)
+        self.setCalendarPopup(True)
+        self.setDisplayFormat("yyyy-MM-dd")
+        self.setMinimumDate(QDate(2000, 1, 1))
+        self.setMaximumDate(QDate(2099, 12, 31))
+        self.setToolTip("点击右侧箭头，在日历中选择日期")
+        line = self.lineEdit()
+        if line is not None:
+            line.setReadOnly(True)
+            line.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is self.lineEdit() and event.type() == QEvent.Type.KeyPress:
+            if event.key() not in self._PASSTHROUGH_KEYS:
+                return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class OptionalDateEdit(QWidget):
+    """Calendar date that stays unbounded until 「不限制」 is cleared."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.date_edit = _CalendarDateEdit()
+        self.date_edit.setEnabled(False)
+        self.unlimited = QCheckBox("不限制")
+        self.unlimited.setChecked(True)
+        layout.addWidget(self.date_edit, 1)
+        layout.addWidget(self.unlimited)
+        self.unlimited.toggled.connect(self._on_unlimited)
+        self.date_edit.dateChanged.connect(self._on_date)
+
+    def _on_unlimited(self, checked):
+        self.date_edit.setEnabled(not checked)
+        self.changed.emit()
+
+    def _on_date(self, *_):
+        self.changed.emit()
+
+    def iso_date(self):
+        if self.unlimited.isChecked():
+            return ""
+        value = self.date_edit.date()
+        return f"{value.year():04d}-{value.month():02d}-{value.day():02d}"
 
 
 class DbNgWorker(QThread):
@@ -135,12 +203,13 @@ class DbNgPage(QWidget):
         self.product = QLineEdit()
         self.product.setPlaceholderText("留空表示全部产品")
         form.addRow("产品", self.product)
-        self.start = QLineEdit()
-        self.start.setPlaceholderText("ISO 时间；留空表示不设下限")
-        form.addRow("开始时间", self.start)
-        self.end = QLineEdit()
-        self.end.setPlaceholderText("ISO 时间；结束时间不包含此时刻")
-        form.addRow("结束时间（不含）", self.end)
+        self.start = OptionalDateEdit()
+        form.addRow("开始日期", self.start)
+        self.end = OptionalDateEdit()
+        form.addRow("结束日期", self.end)
+        date_hint = QLabel("用右侧箭头打开日历选择日期，开始和结束都包含当天。勾选「不限制」表示这一端不筛选。")
+        date_hint.setWordWrap(True)
+        form.addRow(date_hint)
 
         self.exclude_misjudged = QCheckBox("排除人工改判记录")
         self.exclude_misjudged_checkbox = self.exclude_misjudged
@@ -212,10 +281,10 @@ class DbNgPage(QWidget):
             self.new_root,
             self.project,
             self.product,
-            self.start,
-            self.end,
         ):
             widget.textChanged.connect(self._options_changed)
+        self.start.changed.connect(self._options_changed)
+        self.end.changed.connect(self._options_changed)
         for widget in (self.exclude_misjudged, self.raw, self.result):
             widget.toggled.connect(self._options_changed)
         self._initializing = False
@@ -267,8 +336,8 @@ class DbNgPage(QWidget):
             "database": self.database.text().strip(),
             "project": self.project.text().strip() or "CAB-F",
             "product": self.product.text().strip(),
-            "start": self.start.text().strip(),
-            "end": self.end.text().strip(),
+            "start": self.start.iso_date(),
+            "end": _exclusive_next_day(self.end.iso_date()),
             "exclude_misjudged": self.exclude_misjudged.isChecked(),
             "kinds": kinds,
             "old_root": self.old_root.text().strip(),
@@ -300,6 +369,11 @@ class DbNgPage(QWidget):
             return None
         if not self.raw.isChecked() and not self.result.isChecked():
             QMessageBox.warning(self, "图片类型", "至少勾选原图或结果图。")
+            return None
+        start = self.start.iso_date()
+        end = self.end.iso_date()
+        if start and end and start > end:
+            QMessageBox.warning(self, "日期", "结束日期不能早于开始日期。")
             return None
         options = self._options()
         options["database"] = str(database.resolve())

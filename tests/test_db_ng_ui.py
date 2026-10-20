@@ -13,6 +13,8 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from PySide6.QtCore import QDate, QEvent, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
 
 from cosmos_toolbox.db_ng_ui import DbNgPage, DbNgWorker
@@ -80,6 +82,54 @@ class DbNgUiTest(unittest.TestCase):
             page._on_scan_result(plan)
             page.output.setText(str(Path(directory) / "out"))
             self.assertIsNone(page.plan)
+            page.close()
+
+    def test_dates_are_chosen_on_a_calendar_and_include_both_days(self):
+        page = DbNgPage()
+        self.assertTrue(page.start.unlimited.isChecked())
+        self.assertTrue(page.end.unlimited.isChecked())
+        self.assertTrue(page.start.date_edit.calendarPopup())
+        self.assertEqual(page._options()["start"], "")
+        self.assertEqual(page._options()["end"], "")
+
+        page.start.unlimited.setChecked(False)
+        page.end.unlimited.setChecked(False)
+        page.start.date_edit.setDate(QDate(2026, 9, 24))
+        page.end.date_edit.setDate(QDate(2026, 9, 24))
+        self.assertEqual(page._options()["start"], "2026-09-24")
+        self.assertEqual(page._options()["end"], "2026-09-25")
+
+        line = page.start.date_edit.lineEdit()
+        self.assertIsNotNone(line)
+        self.assertTrue(line.isReadOnly())
+        QApplication.sendEvent(
+            line,
+            QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.NoModifier, "1"),
+        )
+        self.assertEqual(page.start.date_edit.date(), QDate(2026, 9, 24))
+        page.close()
+
+    def test_date_selection_invalidates_plan_and_rejects_reversed_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "sample.db"
+            database.touch()
+            page = DbNgPage()
+            page.database.setText(str(database))
+            plan = {"summary": {"ng_records": 1, "image_records": 1, "ready_files": 1, "missing_files": 0, "bytes": 1}}
+            page._on_scan_result(plan)
+            page.end.unlimited.setChecked(False)
+            self.assertIsNone(page.plan)
+
+            page._on_scan_result(plan)
+            page.end.date_edit.setDate(QDate(2026, 9, 1))
+            self.assertIsNone(page.plan)
+
+            page.start.unlimited.setChecked(False)
+            page.start.date_edit.setDate(QDate(2026, 9, 25))
+            page.end.date_edit.setDate(QDate(2026, 9, 24))
+            with patch("cosmos_toolbox.db_ng_ui.QMessageBox.warning") as warning:
+                self.assertIsNone(page._validate_scan())
+            self.assertIn("结束日期", warning.call_args.args[2])
             page.close()
 
 
