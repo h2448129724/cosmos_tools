@@ -14,10 +14,11 @@ from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QDate, QEvent, QThread, QUrl, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QCalendarWidget,
     QCheckBox,
     QDateEdit,
     QFileDialog,
@@ -30,6 +31,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QStyle,
+    QStyleOptionComboBox,
     QVBoxLayout,
     QWidget,
     QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
@@ -52,6 +55,7 @@ def _exclusive_next_day(value):
 class _CalendarDateEdit(QDateEdit):
     """Date field changed from the calendar, not by typing a timestamp."""
 
+    date_accepted = Signal()
     _PASSTHROUGH_KEYS = frozenset({Qt.Key.Key_Tab, Qt.Key.Key_Backtab, Qt.Key.Key_Escape})
 
     def __init__(self, parent=None):
@@ -61,6 +65,7 @@ class _CalendarDateEdit(QDateEdit):
         self.setMinimumDate(QDate(2000, 1, 1))
         self.setMaximumDate(QDate(2099, 12, 31))
         self.setToolTip("点击右侧箭头，在日历中选择日期")
+        self._bound_calendars = set()
         line = self.lineEdit()
         if line is not None:
             line.setReadOnly(True)
@@ -75,6 +80,28 @@ class _CalendarDateEdit(QDateEdit):
     def wheelEvent(self, event):
         event.ignore()
 
+    def mousePressEvent(self, event):
+        arrow = event.button() == Qt.MouseButton.LeftButton and self._hits_arrow(event.position().toPoint())
+        super().mousePressEvent(event)
+        if arrow:
+            QTimer.singleShot(0, self._bind_popup_calendar)
+
+    def _hits_arrow(self, pos):
+        option = QStyleOptionComboBox()
+        option.initFrom(self)
+        option.editable = True
+        option.subControls = QStyle.SubControl.SC_All
+        control = self.style().hitTestComplexControl(QStyle.ComplexControl.CC_ComboBox, option, pos, self)
+        return control == QStyle.SubControl.SC_ComboBoxArrow
+
+    def _bind_popup_calendar(self):
+        for widget in QApplication.allWidgets():
+            if not isinstance(widget, QCalendarWidget) or not widget.isVisible() or widget in self._bound_calendars:
+                continue
+            self._bound_calendars.add(widget)
+            widget.clicked.connect(lambda *_: self.date_accepted.emit())
+            widget.activated.connect(lambda *_: self.date_accepted.emit())
+
 
 class OptionalDateEdit(QWidget):
     """Calendar date that stays unbounded until 「不限制」 is cleared."""
@@ -86,17 +113,22 @@ class OptionalDateEdit(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.date_edit = _CalendarDateEdit()
-        self.date_edit.setEnabled(False)
         self.unlimited = QCheckBox("不限制")
         self.unlimited.setChecked(True)
         layout.addWidget(self.date_edit, 1)
         layout.addWidget(self.unlimited)
         self.unlimited.toggled.connect(self._on_unlimited)
         self.date_edit.dateChanged.connect(self._on_date)
+        self.date_edit.date_accepted.connect(self._accept_date)
 
-    def _on_unlimited(self, checked):
-        self.date_edit.setEnabled(not checked)
+    def _on_unlimited(self, _checked):
         self.changed.emit()
+
+    def _accept_date(self):
+        if self.unlimited.isChecked():
+            self.unlimited.setChecked(False)
+        else:
+            self.changed.emit()
 
     def _on_date(self, *_):
         self.changed.emit()
@@ -207,7 +239,7 @@ class DbNgPage(QWidget):
         form.addRow("开始日期", self.start)
         self.end = OptionalDateEdit()
         form.addRow("结束日期", self.end)
-        date_hint = QLabel("用右侧箭头打开日历选择日期，开始和结束都包含当天。勾选「不限制」表示这一端不筛选。")
+        date_hint = QLabel("直接点日期框右侧箭头打开日历。选中某一天后会取消「不限制」，并包含这一天；再勾选「不限制」则不按该日期筛选。")
         date_hint.setWordWrap(True)
         form.addRow(date_hint)
 

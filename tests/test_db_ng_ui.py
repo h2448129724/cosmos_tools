@@ -88,6 +88,8 @@ class DbNgUiTest(unittest.TestCase):
         page = DbNgPage()
         self.assertTrue(page.start.unlimited.isChecked())
         self.assertTrue(page.end.unlimited.isChecked())
+        self.assertTrue(page.start.date_edit.isEnabled())
+        self.assertTrue(page.end.date_edit.isEnabled())
         self.assertTrue(page.start.date_edit.calendarPopup())
         self.assertEqual(page._options()["start"], "")
         self.assertEqual(page._options()["end"], "")
@@ -107,6 +109,10 @@ class DbNgUiTest(unittest.TestCase):
             QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.NoModifier, "1"),
         )
         self.assertEqual(page.start.date_edit.date(), QDate(2026, 9, 24))
+        page.start.unlimited.setChecked(True)
+        page.start.date_edit.date_accepted.emit()
+        self.assertFalse(page.start.unlimited.isChecked())
+        self.assertEqual(page._options()["start"], "2026-09-24")
         page.close()
 
     def test_date_selection_invalidates_plan_and_rejects_reversed_range(self):
