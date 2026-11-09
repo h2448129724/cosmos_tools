@@ -9,6 +9,8 @@ import sqlite3
 import tempfile
 from datetime import datetime
 
+from .file_lock import exclusive_lock
+
 
 def _source_text(row, kind):
     """原图用相机文件 filename；只有该列为空时才退回缓存列 raw_image。"""
@@ -134,20 +136,8 @@ def copy_plan(plan, output, control=None, on_progress=None):
     if any(output == p or output == p.parent or output in p.parents for p in sources):
         raise ValueError('输出目录不能包含源图片；请选择独立导出目录')
     output.mkdir(parents=True, exist_ok=True)
-    import msvcrt
-    lock = (output / '.ng_copy.lock').open('a+b')
-    lock.seek(0); lock.write(b'0'); lock.flush(); lock.seek(0)
-    try:
-        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        lock.close()
-        raise RuntimeError('此输出目录已有复制任务')
-    try:
+    with exclusive_lock(output / '.ng_copy.lock', '此输出目录已有复制任务'):
         return _copy_locked(plan, output, control, on_progress)
-    finally:
-        lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-        lock.close()
 
 
 def _copy_locked(plan, output, control, on_progress):

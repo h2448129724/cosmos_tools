@@ -21,15 +21,8 @@ REQUIRED_MODULES = (
     "cv2",
     "PIL",
     "PySide6",
-    "torch",
-    "torchvision",
-    "onnx",
-    "onnxruntime",
-    "ultralytics",
-    "albumentations",
-    "scipy",
-    "matplotlib",
     "yaml",
+    "openpyxl",
 )
 
 
@@ -52,20 +45,6 @@ def build_report() -> dict:
         "cosmos_root": str(COSMOS_ROOT),
         "dependencies": [asdict(item) for item in dependency_status()],
     }
-    try:
-        import torch
-
-        report["torch_cuda_available"] = bool(torch.cuda.is_available())
-        report["torch_cuda_version"] = str(torch.version.cuda or "")
-        report["torch_device_count"] = int(torch.cuda.device_count())
-    except Exception:
-        pass
-    try:
-        import onnxruntime as ort
-
-        report["onnxruntime_providers"] = list(ort.get_available_providers())
-    except Exception:
-        pass
     return report
 
 

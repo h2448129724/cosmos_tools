@@ -20,7 +20,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cabf import IMAGE_SUFFIXES, read_image_bgr
+import cv2
+from cabf import IMAGE_SUFFIXES
+from img_tools.core.image_cache import ImagePrefetcher, neighbours
+from img_tools.ui.qt_image import bind_cache_to_widget
+from img_tools.core.image_io import read_image
 
 from ..annotation.adapters.cabf import CabfAnnotationAdapter
 from ..annotation.canvas import AnnotationCanvas
@@ -59,6 +63,7 @@ class LabelVisualizationPage(BaseToolPage):
         self.items: list[VisualizationItem] = []
         self.current_index = -1
         self.adapter = CabfAnnotationAdapter()
+        self._images = bind_cache_to_widget(self, ImagePrefetcher(lambda path: read_image(path, cv2.IMREAD_COLOR)))
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -190,7 +195,10 @@ class LabelVisualizationPage(BaseToolPage):
             return
         self.current_index = index
         item = self.items[index]
-        image = read_image_bgr(item.image_path)
+        image = self._images.get(item.image_path)
+        if image is None:
+            raise FileNotFoundError(f"无法读取图片: {item.image_path}")
+        self._images.prefetch(neighbours([entry.image_path for entry in self.items], index))
         document = self.adapter.load(item.image_path, item.label_path)
         self.canvas.set_document(document)
         self.canvas.set_image(image, image_path=str(item.image_path))

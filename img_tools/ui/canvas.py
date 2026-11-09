@@ -3,28 +3,17 @@ from __future__ import annotations
 
 from typing import Iterable
 
-import cv2
 import numpy as np
+from .qt_image import bgr_to_qpixmap
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from img_tools.core.models import Roi
 
 
 def _to_pixmap(image: np.ndarray) -> QPixmap:
-    if image.ndim == 2:
-        height, width = image.shape
-        qimage = QImage(image.data, width, height, image.strides[0], QImage.Format_Grayscale8)
-    elif image.shape[2] == 4:
-        rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-        height, width = rgba.shape[:2]
-        qimage = QImage(rgba.data, width, height, rgba.strides[0], QImage.Format_RGBA8888)
-    else:
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        height, width = rgb.shape[:2]
-        qimage = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888)
-    return QPixmap.fromImage(qimage.copy())
+    return bgr_to_qpixmap(image)
 
 
 class ImageCanvas(QWidget):

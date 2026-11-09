@@ -32,7 +32,9 @@ from PySide6.QtWidgets import (
 )
 
 from cosmos_toolbox.ui import ActionBar, CollapsibleLogPanel, PageHeader, StatusBanner, set_ui_role
-from img_tools.core.image_io import iter_image_files, read_image
+from img_tools.core.image_cache import ImagePrefetcher, neighbours
+from img_tools.ui.qt_image import bind_cache_to_widget
+from img_tools.core.image_io import iter_image_files
 from img_tools.core.models import Roi
 from img_tools.ui.canvas import ImageCanvas
 
@@ -50,6 +52,7 @@ class ImageWorkspacePage(QWidget):
         super().__init__(parent)
         self.setObjectName("imageWorkspacePage")
         self._files: list[Path] = []
+        self._images = bind_cache_to_widget(self, ImagePrefetcher())
         self._current_path: Path | None = None
         self._current_image: np.ndarray | None = None
         self._project_context = None
@@ -64,7 +67,7 @@ class ImageWorkspacePage(QWidget):
         outer.setContentsMargins(12, 10, 12, 10)
         outer.setSpacing(8)
 
-        header = PageHeader("素材与 ROI", "浏览项目图片、检查像素并在画布上配置 ROI。")
+        header = PageHeader("图片浏览", "浏览项目图片、检查像素并在画布上试画 ROI。")
         outer.addWidget(header)
 
         action_bar = ActionBar()
@@ -214,7 +217,8 @@ class ImageWorkspacePage(QWidget):
         if not 0 <= index < len(self._files):
             return
         path = self._files[index]
-        image = read_image(path)
+        image = self._images.get(path)
+        self._images.prefetch(neighbours(self._files, index))
         if image is None:
             self._append_log(f"无法读取图片：{path}")
             return

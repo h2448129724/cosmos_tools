@@ -6,7 +6,6 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow, QWidget
 
-from .paths import TOOLBOX_ROOT
 from .project_context import ProjectContext, ProjectState
 
 
@@ -66,22 +65,10 @@ class WorkspaceAdapter:
 
 def default_workspace_adapters() -> tuple[WorkspaceAdapter, ...]:
     def image_factory(parent: QWidget) -> QWidget:
-        from img_tools.ui.main_window import workspace_page
+        from img_tools.ui.workspace_page import workspace_page
 
         return workspace_page(parent)
 
-    def labeling_factory(parent: QWidget) -> QWidget:
-        from apps.labeling_ui.app.workspace_page import LabelingWorkspacePage
-
-        return LabelingWorkspacePage(parent=parent)
-
-    def training_factory(parent: QWidget) -> QWidget:
-        from trainer_gui.workspace_page import workspace_page
-
-        return workspace_page(TOOLBOX_ROOT, parent=parent)
-
     return (
-        WorkspaceAdapter("image", "素材与 ROI", "浏览图片、检查像素并编辑 ROI；批量处理请从能力导航进入。", image_factory),
-        WorkspaceAdapter("labeling", "标注与数据", "CAB-F 标注、筛选、校验、数据导出和项目流程。", labeling_factory),
-        WorkspaceAdapter("training", "训练与推理", "训练、推理、评估、ONNX 导出和运行历史。", training_factory),
+        WorkspaceAdapter("image", "图片浏览", "浏览项目图片、检查像素并在画布上试画 ROI；批量处理请用同组其他功能。", image_factory),
     )

@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QComboBox,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -23,14 +22,12 @@ from .capabilities import CapabilityCatalog, STAGE_TITLES
 from .project_context import ProjectState
 from .project_session import ProjectArtifact
 from .layout_presentation import LayoutPresentation
-from shared.conda_runtime import CondaEnvInfo
 
 
 class NavigationRail(QFrame):
     """Project-flow navigation projected from the capability catalog."""
 
     currentChanged = Signal(int)
-    runtimeProfileChanged = Signal(str)
 
     def __init__(self, catalog: CapabilityCatalog, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -76,15 +73,6 @@ class NavigationRail(QFrame):
             self.content_layout.addSpacing(8)
         self.content_layout.addStretch(1)
 
-        self.runtime_label = QLabel("Conda 环境")
-        self.runtime_label.setObjectName("runtimeLabel")
-        outer.addWidget(self.runtime_label)
-        self.runtime_combo = QComboBox()
-        self.runtime_combo.setObjectName("runtimeSelector")
-        self.runtime_combo.setToolTip("只影响之后启动的训练、推理和处理任务；不会重启当前界面")
-        self.runtime_combo.currentIndexChanged.connect(self._emit_runtime_profile)
-        outer.addWidget(self.runtime_combo)
-
     @property
     def is_compact(self) -> bool:
         return self._compact
@@ -100,16 +88,12 @@ class NavigationRail(QFrame):
             self.brand.setText("C")
             self.brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.subtitle.hide()
-            self.runtime_label.hide()
-            self.runtime_combo.hide()
         else:
             self.setMinimumWidth(188)
             self.setMaximumWidth(228)
             self.brand.setText("COSMOS")
             self.brand.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.subtitle.show()
-            self.runtime_label.show()
-            self.runtime_combo.show()
         for heading in self._headings:
             heading.setVisible(not compact)
         for button in self._buttons:
@@ -117,37 +101,6 @@ class NavigationRail(QFrame):
             button.setText(title[:2] if compact else title)
             button.setToolTip(title)
             button.setAccessibleName(title)
-
-    def set_runtime_environments(self, environments: list[CondaEnvInfo], selected_name: str) -> None:
-        blocked = self.runtime_combo.blockSignals(True)
-        self.runtime_combo.clear()
-        if environments:
-            for environment in environments:
-                label = environment.name
-                if environment.is_active:
-                    label += " · 当前"
-                self.runtime_combo.addItem(label, environment.name)
-                index = self.runtime_combo.count() - 1
-                self.runtime_combo.setItemData(index, environment.prefix, Qt.ItemDataRole.ToolTipRole)
-        else:
-            self.runtime_combo.addItem("当前解释器", "")
-            self.runtime_combo.setEnabled(False)
-            self.runtime_combo.setToolTip("未发现 Conda；任务继续使用启动工具箱的 Python")
-        self.runtime_combo.blockSignals(blocked)
-        self.set_runtime_profile(selected_name)
-
-    def set_runtime_profile(self, name: str) -> None:
-        target = str(name or "").casefold()
-        for index in range(self.runtime_combo.count()):
-            if str(self.runtime_combo.itemData(index) or "").casefold() == target:
-                if self.runtime_combo.currentIndex() != index:
-                    blocked = self.runtime_combo.blockSignals(True)
-                    self.runtime_combo.setCurrentIndex(index)
-                    self.runtime_combo.blockSignals(blocked)
-                return
-
-    def _emit_runtime_profile(self, index: int) -> None:
-        self.runtimeProfileChanged.emit(str(self.runtime_combo.itemData(index) or ""))
 
     def _add_capability(self, key: str, title: str) -> None:
         index = len(self._keys)
@@ -212,10 +165,7 @@ class ProjectHeader(QFrame):
 
         self.dataset_chip = QLabel("数据集未选择")
         self.dataset_chip.setObjectName("contextChip")
-        self.model_chip = QLabel("模型未选择")
-        self.model_chip.setObjectName("contextChip")
         layout.addWidget(self.dataset_chip)
-        layout.addWidget(self.model_chip)
         self.settings_button = QPushButton("项目设置")
         self.settings_button.setObjectName("headerSettingsButton")
         self.settings_button.clicked.connect(self.settings_requested)
@@ -225,8 +175,6 @@ class ProjectHeader(QFrame):
         self.project_label.setText(state.project_name or "未命名项目")
         self.dataset_chip.setText(Path(state.dataset_root).name if state.dataset_root else "数据集未选择")
         self.dataset_chip.setToolTip(state.dataset_root)
-        self.model_chip.setText(Path(state.model_path).name if state.model_path else "模型未选择")
-        self.model_chip.setToolTip(state.model_path)
 
     def set_activity(self, stage_title: str, activity_title: str) -> None:
         self.activity_label.setText(f"{stage_title}  /  {activity_title}")
@@ -279,7 +227,6 @@ class ActivityHost(QFrame):
 
 class ProjectInspector(QFrame):
     dataset_requested = Signal()
-    model_requested = Signal()
     image_dir_requested = Signal()
     annotation_dir_requested = Signal()
     output_root_requested = Signal()
@@ -317,7 +264,6 @@ class ProjectInspector(QFrame):
         self.dataset_edit = self._path_field(content_layout, "数据集", self.dataset_requested)
         self.image_dir_edit = self._path_field(content_layout, "图片目录", self.image_dir_requested)
         self.annotation_dir_edit = self._path_field(content_layout, "标注目录", self.annotation_dir_requested)
-        self.model_edit = self._path_field(content_layout, "当前模型", self.model_requested)
         self.output_root_edit = self._path_field(content_layout, "产物目录", self.output_root_requested)
 
         artifact_title = QLabel("最近产物")
@@ -360,7 +306,6 @@ class ProjectInspector(QFrame):
             self.dataset_edit: state.dataset_root,
             self.image_dir_edit: state.image_dir,
             self.annotation_dir_edit: state.annotation_dir,
-            self.model_edit: state.model_path,
             self.output_root_edit: state.output_root,
         }
         for edit, value in values.items():

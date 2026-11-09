@@ -421,6 +421,9 @@ class RoiConfigEditorPage(BaseToolPage):
             QMessageBox.critical(self, "加载失败", str(exc))
             return
 
+        if self._is_cabf_config(self._config_data) and self._open_in_cabf_page(path):
+            return
+
         self._config_path = path
         self._roi_fields = _collect_roi_fields(self._config_data)
         for side in ("top", "bottom"):
@@ -445,6 +448,22 @@ class RoiConfigEditorPage(BaseToolPage):
             self._status.setText("配置已加载，选择左侧 ROI 字段后即可在样本图上调整。")
         if self._field_list.count() > 0:
             self._field_list.setCurrentRow(0)
+
+    @staticmethod
+    def _is_cabf_config(config_data: Any) -> bool:
+        inspection = config_data.get("inspection", {}) if isinstance(config_data, dict) else {}
+        return isinstance(inspection, dict) and str(inspection.get("project", "")).upper() == "CAB-F"
+
+    def _open_in_cabf_page(self, path: Path) -> bool:
+        """CAB-F ROI live in calibrated-reference coordinates; edit them there."""
+        window = self._mw
+        context = getattr(window, "context", None)
+        navigate = getattr(window, "navigate", None)
+        if context is None or not callable(navigate):
+            return False
+        context.update(cabf_config_path=str(path.resolve()))
+        navigate("cabf.config_studio")
+        return True
 
     def _on_field_selected(self, row: int):
         if row < 0 or row >= len(self._visible_field_indices):

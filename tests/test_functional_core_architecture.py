@@ -20,20 +20,10 @@ EXPECTED_CORE_NAMES = {
     "cosmos_toolbox.task_presentation",
     "cosmos_toolbox.layout_presentation",
     "cosmos_toolbox.workbench_state",
-    "cosmos_toolbox.cabf_calibration",
-    "cosmos_toolbox.training.model_resolution",
     "img_tools.core.crop_plan",
     "img_tools.core.fixed_roi",
-    "trainer_gui.run_plan",
-    "apps.cabf_flow.annotation_source_core",
     "apps.cabf_flow.plan",
-    "apps.cosmos_pipeline.outcome",
-    "apps.cosmos_pipeline.request_plan",
     "apps.point_marking.point_core",
-    "modules.sew_point.inference_core",
-    "modules.sew_point_conntect.evaluation_core",
-    "modules.sew_point_conntect.inference_core",
-    "modules.yolo.action_plan",
 }
 
 

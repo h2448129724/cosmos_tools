@@ -202,6 +202,7 @@ class DbNgPage(QWidget):
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
+        self.header_widgets = (title, explanation)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -432,7 +433,7 @@ class DbNgPage(QWidget):
         self.status.setText("正在只读扫描数据库…")
         self.preview.clear()
         from .worker_task_bridge import bind_worker_task
-        bind_worker_task(self, '数据库 NG：扫描', 'cabf.db_ng_export')
+        bind_worker_task(self, '数据库 NG：扫描', 'data.ng_extract')
         self.worker.start()
 
     # Small method aliases make this page convenient for shell adapters and
@@ -462,7 +463,7 @@ class DbNgPage(QWidget):
         self.progress_bar.setRange(0, 0)
         self.status.setText("正在复制计划中的图片…")
         from .worker_task_bridge import bind_worker_task
-        bind_worker_task(self, '数据库 NG：复制', 'cabf.db_ng_export')
+        bind_worker_task(self, '数据库 NG：复制', 'data.ng_extract')
         self.worker.start()
 
     def _start_copy(self):

@@ -1,4 +1,4 @@
-"""Text-preserving CAB-F match-template config tests."""
+"""CAB-F YAML document tests: read-only template paths and ROI round trips."""
 
 from __future__ import annotations
 
@@ -7,67 +7,56 @@ from pathlib import Path
 
 import pytest
 import yaml
-from types import SimpleNamespace
-import numpy as np
 
 
 TOOLBOX = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLBOX))
 sys.path.insert(0, str(TOOLBOX / "shared" / "cabf_common"))
 
-from cosmos_toolbox.cabf_config import (  # noqa: E402
-    CabfConfigDocument,
-    CabfConfigError,
-    _patch_match_template_path,
-)
+from cosmos_toolbox.cabf_config import CabfConfigDocument, CabfConfigError  # noqa: E402
 
 
-def test_patch_inline_match_template_preserves_yaml_and_comments() -> None:
-    text = 'inspection:\n  match_template: ["top.png", \'bottom.png\'] # retain this\n'
-    patched = _patch_match_template_path(text, 1, r"D:\templates\bottom#1's.png")
-    parsed = yaml.safe_load(patched)
-    assert parsed["inspection"]["match_template"][1] == r"D:\templates\bottom#1's.png"
-    assert "# retain this" in patched
+def _write(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "product.yaml"
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
-def test_update_template_path_does_not_mutate_document_on_patch_failure(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("inspection:\n  match_template: [top.png]\n", encoding="utf-8")
-    document = CabfConfigDocument.load(config_path)
-    before = document.original_text
+def test_load_rejects_yaml_without_inspection(tmp_path: Path) -> None:
     with pytest.raises(CabfConfigError):
-        document.update_template_path("bottom", tmp_path / "bottom.png")
-    assert document.original_text == before
-    assert document.template_value("top") == "top.png"
+        CabfConfigDocument.load(_write(tmp_path, "other: 1\n"))
 
 
-@pytest.mark.parametrize('existing', [False, True])
-def test_template_save_rolls_back_if_config_commit_fails(tmp_path, monkeypatch, existing):
-    from cosmos_toolbox import cabf_activity
-    target = tmp_path / 'template.png'
-    if existing:
-        target.write_bytes(b'previous-template')
-    def fail(*args):
-        raise OSError('config write denied')
-    document = SimpleNamespace(template_path=lambda side: target,
-                               validate_template_path_update=lambda *args: None,
-                               update_template_path=fail)
-    errors = []
-    page = SimpleNamespace(side='top', document=document,
-                           _generated_templates={'top': SimpleNamespace(image=np.zeros((4, 4), np.uint8))},
-                           update_config_check=SimpleNamespace(isChecked=lambda: True),
-                           _show_error=lambda title, exc: errors.append(str(exc)))
-    monkeypatch.setattr(cabf_activity.QFileDialog, 'getSaveFileName', lambda *args: (str(target), 'PNG'))
-    cabf_activity.CabfConfigActivity._save_template(page)
-    assert errors == ['config write denied']
-    if existing:
-        assert target.read_bytes() == b'previous-template'
-    else:
-        assert not target.exists()
+@pytest.mark.parametrize(
+    "templates",
+    ['["top.png", "bottom.png"]', "[{path: top.png, score: 0.5}, {path: bottom.png}]"],
+)
+def test_template_path_reads_string_and_mapping_entries(tmp_path: Path, templates: str) -> None:
+    (tmp_path / "bottom.png").write_bytes(b"")
+    document = CabfConfigDocument.load(_write(tmp_path, f"inspection:\n  match_template: {templates}\n"))
+    assert document.template_path("bottom") == (tmp_path / "bottom.png").resolve()
 
 
-def test_flow_mapping_preserves_other_fields():
-    text = 'inspection:\n  match_template: [{path: top.png, score: 0.5}, {path: bottom.png}] # keep\n'
-    patched = _patch_match_template_path(text, 0, 'new.png')
-    assert yaml.safe_load(patched)['inspection']['match_template'][0] == {'path': 'new.png', 'score': .5}
-    assert '# keep' in patched
+def test_missing_template_entry_is_none(tmp_path: Path) -> None:
+    document = CabfConfigDocument.load(_write(tmp_path, "inspection:\n  match_template: [top.png]\n"))
+    assert document.template_path("bottom") is None
+
+
+def test_save_rois_preserves_comments_and_writes_new_coordinates(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "inspection:\n"
+        "  project: CAB-F  # keep me\n"
+        "  top:\n"
+        "    glue:\n"
+        "      roi: [10, 20, 30, 40]\n",
+    )
+    document = CabfConfigDocument.load(path)
+    (field,) = document.roi_fields("top")
+    document.set_rects(field, [(11, 21, 31, 41)])
+    assert not document.validate_rois("top", (100, 100))
+    document.save_rois()
+
+    saved = path.read_text(encoding="utf-8")
+    assert "# keep me" in saved
+    assert yaml.safe_load(saved)["inspection"]["top"]["glue"]["roi"] == [11, 21, 31, 41]

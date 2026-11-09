@@ -16,19 +16,12 @@ class ProjectState:
     image_dir: str = ""
     annotation_dir: str = ""
     cabf_config_path: str = ""
-    cabf_source_top: str = ""
-    cabf_source_bottom: str = ""
     cabf_reference_top: str = ""
     cabf_reference_bottom: str = ""
     cabf_template_top: str = ""
     cabf_template_bottom: str = ""
-    pipeline_config_path: str = ""
-    pipeline_backend_config_path: str = ""
-    pipeline_input_manifest_path: str = ""
-    model_path: str = ""
     output_root: str = ""
     selected_image: str = ""
-    runtime_profile: str = "onnx-gpu"
 
 
 class ProjectContext(QObject):
@@ -106,25 +99,19 @@ class ProjectContext(QObject):
         if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2}:
             return ProjectState()
         if payload.get("schema_version") == 1:
-            payload["cabf_source_top"] = self._normalize_value(
-                "cabf_source_top", payload.get("cabf_reference_top", "")
-            )
-            payload["cabf_source_bottom"] = self._normalize_value(
-                "cabf_source_bottom", payload.get("cabf_reference_bottom", "")
-            )
+            # Schema 1 stored raw source images under the reference keys.
             payload["cabf_reference_top"] = ""
             payload["cabf_reference_bottom"] = ""
         values = {
             field.name: str(payload.get(field.name, field.default) or "")
             for field in fields(ProjectState)
         }
-        values["runtime_profile"] = values["runtime_profile"] or "onnx-gpu"
         return ProjectState(**values)
 
     @staticmethod
     def _normalize_value(key: str, value: object) -> str:
         text = str(value or "").strip()
-        if not text or key in {"project_name", "runtime_profile"}:
+        if not text or key == "project_name":
             return text
         return str(Path(text).expanduser().resolve())
 

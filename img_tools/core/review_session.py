@@ -185,6 +185,25 @@ def plan_standalone_review_move(
     )
 
 
+def restore_review_item(
+    session: ReviewSession,
+    item: ReviewItem,
+    index: int,
+    disposition: ReviewDisposition,
+) -> ReviewSession:
+    """Undo one decision: reinsert ``item`` at ``index`` and select it."""
+    if disposition not in {"accepted", "removed"}:
+        raise ValueError(f"未知的审阅处置：{disposition}")
+    position = max(0, min(int(index), len(session.items)))
+    items = session.items[:position] + (item,) + session.items[position:]
+    return ReviewSession(
+        items=items,
+        current_index=position,
+        accepted_count=max(0, session.accepted_count - (disposition == "accepted")),
+        removed_count=max(0, session.removed_count - (disposition == "removed")),
+    )
+
+
 def plan_review_undo(
     *,
     original_source: Path,
@@ -212,6 +231,7 @@ __all__ = [
     "clear_review_selection",
     "plan_review_decision",
     "plan_review_undo",
+    "restore_review_item",
     "plan_standalone_review_move",
     "select_review_index",
 ]

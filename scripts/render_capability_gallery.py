@@ -21,7 +21,7 @@ from PySide6.QtCore import QCoreApplication  # noqa: E402
 from PySide6.QtGui import QFont, QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from cosmos_toolbox.paths import TOOLBOX_ROOT, ensure_import_paths  # noqa: E402
+from cosmos_toolbox.paths import ensure_import_paths  # noqa: E402
 
 ensure_import_paths()
 
@@ -39,41 +39,28 @@ class _IsolatedRuntimeState:
 def _isolated_runtime_state(root: Path):
     """Route legacy workspace persistence to a disposable QA directory."""
     from apps.cabf_flow.flow import CONFIG_PATH
-    from apps.labeling_ui.app import main_window as labeling_main_window
-    from trainer_gui import main_window as trainer_main_window
+    from apps.labeling_ui.app.tools import workflow_page as labeling_main_window
 
     root = Path(root).resolve()
     config_path = root / "cabf_flow" / "default_paths.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(CONFIG_PATH, config_path)
+    if Path(CONFIG_PATH).exists():
+        shutil.copyfile(CONFIG_PATH, config_path)
 
-    settings_root = root / "trainer"
-    settings_path = settings_root / "artifacts" / "gui_settings.json"
-    real_settings_path = TOOLBOX_ROOT / "artifacts" / "gui_settings.json"
-    if real_settings_path.exists():
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(real_settings_path, settings_path)
+    settings_path = root / "artifacts" / "gui_settings.json"
 
     original_config_path = labeling_main_window.CONFIG_PATH
-    original_settings_manager = trainer_main_window.SettingsManager
-
-    class _QaSettingsManager(original_settings_manager):
-        def __init__(self, _project_root):
-            super().__init__(settings_root)
-
     labeling_main_window.CONFIG_PATH = config_path
-    trainer_main_window.SettingsManager = _QaSettingsManager
     try:
         yield _IsolatedRuntimeState(config_path=config_path, settings_path=settings_path)
     finally:
         labeling_main_window.CONFIG_PATH = original_config_path
-        trainer_main_window.SettingsManager = original_settings_manager
 
 
 def _persistence_snapshot() -> dict[Path, bytes | None]:
     from apps.cabf_flow.flow import CONFIG_PATH
 
-    watched = (Path(CONFIG_PATH), TOOLBOX_ROOT / "artifacts" / "gui_settings.json")
+    watched = (Path(CONFIG_PATH),)
     return {path: path.read_bytes() if path.exists() else None for path in watched}
 
 

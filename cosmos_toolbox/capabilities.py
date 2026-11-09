@@ -12,7 +12,6 @@ from .capability_catalog import (
 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
-    from shared.conda_runtime import CondaEnvManager
 
     from .page_router import PageRouter
     from .project_context import ProjectContext
@@ -26,7 +25,6 @@ class CapabilityRuntime(Protocol):
     project_session: "ProjectSession"
     page_router: "PageRouter"
     task_center: "TaskCenter"
-    conda_manager: "CondaEnvManager"
 
     def open_capability(self, key: str) -> None: ...
 

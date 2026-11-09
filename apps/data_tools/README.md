@@ -1,20 +1,8 @@
 # Data Tools
 
-来源：
+批量处理逻辑，供 `apps/labeling_ui` 的页面调用：
 
-- 由原 `img_tools/core` 与 `img_tools/utils` 迁入
-
-当前职责：
-
-- 图像读写
-- 批量裁剪
-- 自动切块
-- 关键词分类
-- CABF 数据集 facade / 兼容桥接
-
-说明：
-
-- 当前已改为包内相对导入
-- 这些模块主要供 `apps/labeling_ui` 调用
-- `processing/` 对应原 `core/`
-- `common/` 对应原 `utils/`
+- `processing/batch_crop.py`：按 ROI 批量裁剪（裁剪框规则来自 `img_tools.core.crop_plan`）
+- `processing/auto_tile_crop.py`：自动切块
+- `processing/keyword_split.py`：按文件名关键字分类
+- `processing/image_io.py`：兼容转发，实际实现在 `img_tools.core.image_io`

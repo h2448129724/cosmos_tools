@@ -1,88 +1,66 @@
 # Cosmos 个人工具箱
 
-放置在 Cosmos 的 `tools/` 下，但不进入 Cosmos Git。包含通用图像处理、CAB-F 标注数据工具和完整训练/推理入口。
+放置在 Cosmos 的 `tools/` 下，但不进入 Cosmos Git。这是一个轻量的数据与标注工具箱：图像整理与裁剪、CAB-F 点边标注与数据集导出、现场 NG 数据提取、数据库浏览和图片压缩。
 
-当前界面采用任务导向的统一项目工作台：紧凑项目栏显示当前项目，左侧流程导航由能力目录生成，中央活动宿主一次承载一项业务活动，右侧项目检查器按需编辑路径，“任务与日志”能力集中运行状态与日志。图像、标注和训练不再打开三个独立主窗口。
+工具箱**不包含模型训练与推理**，也不依赖 torch / onnx / onnxruntime / ultralytics。模型训练、ONNX 导出和完整检测请在 Cosmos 主仓库或独立训练环境中完成；这里只负责准备和查看数据。
 
-视觉上采用朴素桌面工程工具风格：浅灰导航和工作区、细边框、2–3px 小圆角及紧凑控件；蓝色仅用于当前选择和主要操作。避免深色品牌侧栏、胶囊徽章、大面积装饰色和多层卡片嵌套。
+## 依赖与启动
 
-## 启动
+运行依赖只有 `numpy`、`Pillow`、`opencv-python`、`PySide6`、`openpyxl`、`pyyaml`（见 `requirements.txt`）。
 
 ```powershell
 .\启动Cosmos工具箱.ps1
-```
-
-默认使用 conda 环境 `onnx-gpu`。环境检查：
-
-```powershell
-.\启动Cosmos工具箱.ps1 --preflight
-```
-
-也可以让工作台启动后直接定位到某个工作区：
-
-```powershell
+.\启动Cosmos工具箱.ps1 --preflight      # 检查依赖
 .\启动Cosmos工具箱.ps1 --workspace image
 .\启动Cosmos工具箱.ps1 --workspace labeling
-.\启动Cosmos工具箱.ps1 --workspace training
 ```
+
+启动脚本默认查找 conda 环境 `onnx-gpu` 的 Python；任何装好上述依赖的 Python 3.12+ 环境都可以运行，例如 `python -m cosmos_toolbox`。
 
 ## 项目工作台
 
-顶部项目栏共享以下信息：
+单窗口工作台：顶部项目栏显示当前项目，左侧导航由能力目录生成，中央一次承载一项活动，右侧“项目设置”编辑共享路径，“任务与日志”集中显示后台任务。
+
+项目上下文共享以下信息，保存在被忽略的 `artifacts/project_workspace.json`：
 
 - 项目名称与数据集根目录
 - 图片目录与标注目录
-- 当前模型与产物目录
-- 固定运行环境 `onnx-gpu`
+- 产物目录
 
-选择数据集根目录后，会优先识别 `master_images` / `images`、`master_annotations` / `annotations` / `labels` 和 `outputs` / `runs` / `artifacts`。共享状态保存在被忽略的 `artifacts/project_workspace.json`。
-
-工作区之间的首批联动：
-
-- 图像工作区可以直接载入当前项目图片，并把当前选中图片写回项目上下文。
-- CAB-F 标注、筛选、数据导出和 9 步流程会接收当前图片、标注、模型与产物路径。
-- 训练表单会自动填入当前图片目录、标注目录和兼容的模型路径。
+选择数据集根目录后，会优先识别 `master_images` / `images`、`master_annotations` / `annotations` / `labels` 和 `outputs` / `runs` / `artifacts`。
 
 ### 单窗口交互约定
 
-- 工作区主界面和业务功能页都嵌入同一个主窗口；CAB-F 流程、点边标注、数据筛选、数据集导出、图像任务历史、训练设置和完整日志等不会再创建独立业务窗口。
-- 进入业务功能时，主内容区显示统一的页面标题、说明和“返回”按钮。业务页可以继续打开下一级页面；返回时按后进先出顺序逐层回到上一级，最后回到发起该流程的工作区，已有流程状态不会因打开下一级页面而丢失。
-- 切换左侧项目流程能力会结束当前业务页面栈，并直接进入所选活动。
-- 只有操作系统文件/目录选择、危险操作确认以及错误提示允许使用弹窗；业务表单、编辑器、历史记录和日志详情应保持在主窗口内。
-- 三个业务入口仍可独立运行，用于开发和兼容；从 Cosmos 工具箱启动时统一使用原生 `QWidget` workspace page，不创建或伪造嵌套菜单栏。
+- 业务页面都嵌入同一个主窗口，进入业务页时显示统一的标题、说明和“返回”按钮；返回按后进先出逐层回到发起该流程的工作区。
+- 切换左侧能力会结束当前业务页面栈，并直接进入所选活动。
+- 只有操作系统文件/目录选择、危险操作确认以及错误提示允许使用弹窗。
 
-### 扩展定制功能
+## 功能一览
 
-顶层导航不再写死在主窗口中。通用或定制功能先进入纯能力目录计划，再由 Qt factories / workspace activators 绑定到左侧项目流程并交给活动宿主打开。新增能力应提供原生业务页面；旧 `QMainWindow` 只通过兼容 adapter 继续工作。训练 feature 扫描失败或没有启用项时，原生 Training 工作区会作为可见 fallback，入口不会静默消失。
+| 分组 | 功能 |
+| --- | --- |
+| CAB-F | CAB-F 数据与标注流程、点边标注、CAB-F ROI 配置 |
+| 标注与复核 | 样本审阅、标注可视化、点位标注导出 |
+| 现场数据 | NG 原图提取（数据库 / Excel 两种来源）、数据库浏览 |
+| 图片处理 | 图片浏览、图片压缩、批量裁剪、逐张裁剪、自动分块、关键字划分、内侧 Mask、YAML ROI 编辑（通用） |
+| 产物 | 项目产物、任务与日志 |
 
-训练模块会从 `module.json` 自动生成训练能力。例如 `sew_point_conntect` 会显示为独立训练入口，打开时自动选择对应训练模块，而不再显示训练工具自己的重复模块导航。
+每类工作只有一个入口：人工筛选统一用“样本审阅”（A/D 翻页，S 保留，W 移除，Z 撤销，可多步撤销），CAB-F 流程里的“数据筛选”也是它；数据集校验与导出只在 CAB-F 流程第 4 步；通用 YAML ROI 编辑器遇到 CAB-F 配置会自动转到“CAB-F ROI 配置”，因为 CAB-F ROI 必须基于校准基准图坐标。
 
-Segmentation 的“导出 ONNX”动作支持 `microunet` / `microunet_gn`、二分类或多标签输出通道，并生成高宽动态（尺寸需能被 4 整除）的模型。导出器会先在临时文件上执行 ONNX 结构检查及静态/动态尺寸 PyTorch 数值对照，全部通过后才替换目标产物。
+### CAB-F 数据与标注流程
 
-运行中的训练会同步到统一任务中心，完成后在项目会话中登记产物。项目设置中的路径和项目会话中的产物血缘是两类状态：前者描述当前输入，后者描述运行产生了什么。
+四个步骤：**数据集准备 → 数据筛选 → 点边标注 → 校验与导出**。
 
-首个原生定制能力是“CAB-F 配置与模板”：手动选择产品 YAML 和 TOP/BOTTOM 初始原图，一次生成全尺寸彩色校准基准图与半尺寸二值匹配模板。YAML ROI 只在校准基准图坐标系中查看、创建和调整；匹配模板仅用于生产标定匹配，不承载 ROI。生成任务在后台读取 Cosmos 的 `assets/config/backend_config.yaml → cab_f.glue_segment.path`，沿用现有权重注册解析，不再使用旧脚本写死的 `.pth`。大尺寸基准图在画布中降采样到最长边 4096，ROI 写回时仍保持全尺寸校准坐标。
+- 数据筛选打开样本审阅，结果写回流程的母图目录。
+- 点边标注打开点边一体标注器，直接读写母标注目录，在同一界面里修正缝纫点和连边。
+- 校验与导出在页面内的后台线程执行，显示结构化统计（总样本、通过、错误、警告；导出数、跳过数），可取消；导出点数据集与连边数据集。
+- 命令行入口：`python scripts/cabf_flow.py validate|export|pipeline|doctor|show-config|init-config`。流程路径保存在本机的 `apps/cabf_flow/config/default_paths.json`（不进 Git）。
 
-实现位置：
+### CAB-F ROI 配置
 
-- `cosmos_toolbox/project_context.py`：共享项目状态与持久化。
-- `cosmos_toolbox/project_session.py`：产物与来源任务的持久化。
-- `cosmos_toolbox/capability_catalog.py` / `capabilities.py`：纯能力 specification/catalog projection 与 shell binding interface。
-- `cosmos_toolbox/default_capabilities.py`：feature 扫描、Qt factories 和 workspace activators adapter。
-- `cosmos_toolbox/cabf_calibration.py` / `cabf_config.py`：CAB-F 校准计划与 YAML/OpenCV/模型 shell。
-- `apps/cabf_flow/annotation_source_core.py` / `annotation_source.py`：requested → master → prediction 标注源决策与 JSON/目录扫描 shell。
-- `modules/sew_point_conntect/evaluation_core.py`：连边 normalization、指标、点匹配和 graph lifting 的唯一规则来源。
-- `modules/segmentation/tools/export_onnx.py`：Segmentation checkpoint 的动态 ONNX 导出、数值验证与原子发布 shell。
-- `cosmos_toolbox/cabf_activity.py`：主界面内的 CAB-F 配置、基准图、模板和 ROI 工作台。
-- `cosmos_toolbox/shell_widgets.py`：流程导航、活动宿主、项目检查器与常驻任务摘要。
-- `cosmos_toolbox/task_center.py` / `task_ledger.py` / `task_presentation.py`：任务 shell、纯账本和统一呈现投影。
-- `cosmos_toolbox/workspaces.py`：native workspace seam；只对显式 legacy `QMainWindow` 执行兼容嵌入。
-- `cosmos_toolbox/page_router.py` / `route_state.py`：Qt 页面 router 与纯路由状态。
-- `cosmos_toolbox/workbench_state.py`：导航、header ownership、检查器、viewport 与任务摘要的纯 reducer。
-- `cosmos_toolbox/ui/`：全工作台共享 theme、primitives 与 responsive projection。
-- `apps/point_marking/point_core.py`：点位顺序、导出投影与二层列表文本编码的唯一规则来源。
-- `apps/labeling_ui/app/tools/point_mark_page.py`：点位标注画布、坐标表格与导出的 Qt adapter。
-- `cosmos_toolbox/app.py`：单窗口 Shell、能力导航、活动切换与统一样式。
+手动选择产品 YAML，再为 TOP/BOTTOM 各选一张全尺寸校准基准图。YAML ROI 只在校准基准图坐标系中查看、创建和调整；配置中的匹配模板只读预览。大尺寸基准图在画布中降采样到最长边 4096，ROI 写回时仍保持全尺寸坐标；保存前会校验越界，并保留 YAML 注释和格式、生成备份。
+
+基准图与匹配模板由生产侧工具生成，工具箱不再包含胶体分割模型。
 
 ## 点位标注导出
 
@@ -106,51 +84,47 @@ Segmentation 的“导出 ONNX”动作支持 `microunet` / `microunet_gn`、二
 
 ## Functional Core / Imperative Shell
 
-业务决定先由 dependency-light functional core 根据显式 facts 生成状态、结果或计划，imperative shell 再负责 Qt、目录/YAML/JSON、进程/线程、Conda、Torch/ONNX、GPU 和文件写入。主要 seams 包括 Cosmos 请求/结局、能力目录计划、CAB-F ROI/数据集/工作流/标注源/校准、任务账本与呈现、模型选择、训练运行计划、Sew Point/连边推理与评估、YOLO 动作、点边编辑、图像裁剪和数据审阅。
+业务决定先由 dependency-light functional core 根据显式 facts 生成状态、结果或计划，imperative shell 再负责 Qt、目录/YAML/JSON、进程/线程和文件写入。主要 seams 包括能力目录计划、CAB-F ROI/数据集/工作流、任务账本与呈现、点边编辑、图像裁剪和数据审阅。
 
-新增规则应先进入 pure core；CLI、项目工作台和 legacy workspace 只做 adapter。任务级模型/runtime 显式持有并在任务内复用，不使用隐式全局 cache。CAB-F 数据集按 `read facts → assess/decide → persist` 运行，裁剪按 `decode → plan → slice/write` 运行，数据审阅按 `plan → preflight/execute → commit/rollback` 运行。
+实现位置：
 
-架构回归：
+- `cosmos_toolbox/project_context.py` / `project_session.py`：共享项目状态与产物登记。
+- `cosmos_toolbox/capability_catalog.py` / `capabilities.py` / `default_capabilities.py`：纯能力目录计划与 Qt factories。
+- `cosmos_toolbox/cabf_config.py` / `cabf_activity.py`：CAB-F YAML 文档与 ROI 工作台。
+- `apps/cabf_flow/plan.py` / `flow.py`：CAB-F 校验与导出计划、CLI shell。
+- `apps/labeling_ui/app/tools/workflow_page.py`：CAB-F 四步流程页（`CabfWorkflowActivity` 直接挂到工作台）。
+- `apps/labeling_ui/app/dataset_export_panel.py`：进程内的校验与点 / 连边数据集导出面板。
+- `cosmos_toolbox/ng_extract_ui.py`：NG 原图提取的统一入口，内含数据库与 Excel 两种来源。
+- `img_tools/core/image_io.py`：全工具箱唯一的图片读写（Unicode 路径、EXIF 方向只处理一次、编码失败抛错）。
+- `img_tools/core/review_session.py`：样本审阅的纯状态迁移，包括撤销。
+- `img_tools/core/image_cache.py`：逐张浏览的解码缓存与后台预取（当前图前后各一张，文件变化自动重新解码）；`img_tools/ui/qt_image.py` 负责 BGR → Qt 转换，并在页面隐藏时释放缓存。
+- `cosmos_toolbox/shell_widgets.py` / `app.py`：导航、活动宿主、项目检查器、任务摘要与单窗口 Shell。
+- `cosmos_toolbox/task_center.py` / `task_ledger.py` / `task_presentation.py`：任务 shell、纯账本和统一呈现投影。
+- `cosmos_toolbox/page_router.py` / `route_state.py` / `workbench_state.py`：页面路由与工作台 reducer。
+- `cosmos_toolbox/file_lock.py`：跨平台输出目录排他锁（Windows `msvcrt`，其他平台 `fcntl`）。
+- `cosmos_toolbox/ui/`：共享 theme、primitives 与 responsive projection。
+- `apps/point_marking/point_core.py` / `apps/labeling_ui/app/tools/point_mark_page.py`：点位顺序与导出规则及其 Qt adapter。
 
-```powershell
-conda run -n onnx-gpu python -m pytest -q tests/test_functional_core_architecture.py tests/test_core_import_purity.py
-conda run -n onnx-gpu python -m pytest -q
-```
+新增规则应先进入 pure core；CLI、项目工作台和 legacy workspace 只做 adapter。
 
-视觉与 teardown QA：
-
-```powershell
-conda run -n onnx-gpu python scripts/render_capability_gallery.py --output "$env:TEMP\cosmos-toolbox-ui-qa" --width 1280 --height 760
-conda run -n onnx-gpu python scripts/render_capability_gallery.py --output "$env:TEMP\cosmos-toolbox-ui-qa-wide" --width 1540 --height 920
-```
-
-脚本使用隔离的项目/训练设置副本，并在 offscreen 模式显式加载可用 CJK 字体；不会修改真实工作区持久化文件。
-
-## 模型来源
-
-### 运行与导出安全约定
-
-- 训练项目名是名称而不是输出路径：路径分隔符、上级目录和 Windows 保留名称会规范化为安全名称，并检查路径不能逃逸运行根目录；每次运行使用独立身份，不复用同秒目录。
-- 现场数据集复用和导出会验证 PNG 完整容器、完整像素解码与标签尺寸。人工修改的有效 JSON 保留；损坏的已有样本不会被自动覆盖。
-- 历史导出支持在样本之间暂停、继续、停止。`export_state.json` 的 `complete` 表示流程完整结束；`stopped` / `failed` 或目录中的 `INCOMPLETE.txt` 表示不能把它当作完整数据集。`validation.json` 另记录数据与 preview 的校验结果。
-- “停止并导出”仍会先停止生成，再完成已提交样本的导出；普通停止及历史导出的停止，不再启动后续样本。编码/解码和当前文件复制内部不是强制中断点。
-- 现场批次执行位于 `field_batch.py`，Qt 页面仅提供执行与进度 adapter；历史清单和运行快照格式保持兼容。
-
-模型注册中心会先按任务和运行模式筛选兼容实现，再按优先级解析：CAB-F 根入口生产 factory（优先级 300）→ CAB-F 根入口训练 factory（200）→ 工具箱内随迁移代码保存的本地模型（100）→ 外部 Ultralytics（50）。
-
-CAB-F 根入口为缝纫点与连边任务公开惰性的生产 ONNX 推理 factory，只参与 `infer` 模式；训练和导出通过同一入口取得项目内可训练模型。`training/cab_f_project.py` 集中适配两种布局：存在 `projects.load_project_package` 时使用现代公开入口；当前 legacy 分支则惰性映射至 `algo.cab_f` 与 `train` 的已有实现。现代入口初始化错误不会被静默降级；业务调用方不再各自判断分支布局。
-
-训练产物默认写入本工具箱的 `runs/` / `artifacts/`，不会自动覆盖 `assets/weights`。生产发布必须经过显式 ONNX 导出和兼容性验证。
-
-重复执行模型与 ONNX 契约检查：
+回归测试：
 
 ```powershell
-.\启动Cosmos工具箱.ps1 --preflight
-conda run -n onnx-gpu python -m cosmos_toolbox.training.verify_contracts
+python -m pytest -q
 ```
-## 数据库导出与 Excel NG 提取
 
-在左侧“数据准备”中打开“数据库导出与 Excel NG 提取”：
+视觉 QA（offscreen 渲染所有能力页，不修改真实持久化文件）：
+
+```powershell
+python scripts/render_capability_gallery.py --output "$env:TEMP\cosmos-toolbox-ui-qa" --width 1280 --height 760
+```
+
+## NG 原图提取
+
+在左侧“现场数据”中打开“NG 原图提取”，按情况选择来源：
+
+- **来源：数据库**：能直接访问 SQLite 和原图时使用，扫描生成只读复制计划，可暂停、停止和续跑，详见 `DB_NG_EXPORT.md`。
+- **来源：Excel / 导出 Excel**：只有导出的 Excel，或要在另一台电脑上提取时使用，步骤如下。
 
 1. **数据库 → Excel**：选择 SQLite 数据库和 `.xlsx` 输出路径。默认导出全部用户表；也可每行填写一个表名。每张表对应一个工作表，保留关联 ID、JSON 和图片路径；长文本拆列，大整数按文本保存。默认不覆盖已有文件。
 2. **Excel → NG 原图**：导出完成后自动填入 Excel 路径，也可直接选择其他电脑导出的 Excel。填写图片输出目录，按需设置原图盘符（默认 `E:`）、盘符映射根目录、检测起止时间和“只提取 NG 面”。先用“仅检查”查看源图缺失或目标冲突，再执行复制。
@@ -159,18 +133,18 @@ conda run -n onnx-gpu python -m cosmos_toolbox.training.verify_contracts
 
 复制平铺到输出目录，同名异源按来源目录加稳定前缀，保持正反面配对；相同内容跳过，不同内容不覆盖。实际复制自动生成 UTF-8 CSV 清单，含成功、缺失、冲突和未处理状态；页面显示前 200 条。仅检查默认不创建输出目录，也可指定新的 CSV 路径保存检查结果。图片任务可在文件之间停止；Excel 导出期间请等待完成后关闭窗口。两个步骤均在后台执行，记录到“任务与日志”。
 
-需要 `openpyxl`（当前 `onnx-gpu` 已包含）。工具箱内也提供命令行入口，参数与原脚本兼容：
+需要 `openpyxl`（已列入 `requirements.txt`）。工具箱内也提供命令行入口，参数与原脚本兼容：
 
 ```powershell
-conda run -n onnx-gpu python scripts/export_db_to_excel.py --db D:/data/cosmos.db --output D:/data/cosmos.xlsx
-conda run -n onnx-gpu python scripts/copy_ng_images.py --excel D:/data/cosmos.xlsx --output D:/NG_recheck --source-root F:/ --start-date 2026-10-01 --end-date 2026-10-11 --dry-run
+python scripts/export_db_to_excel.py --db D:/data/cosmos.db --output D:/data/cosmos.xlsx
+python scripts/copy_ng_images.py --excel D:/data/cosmos.xlsx --output D:/NG_recheck --source-root F:/ --start-date 2026-10-01 --end-date 2026-10-11 --dry-run
 ```
 
-去掉 `--dry-run` 执行复制。已有“数据库 NG 图片提取”入口继续用于直接读取数据库的工作流。
+去掉 `--dry-run` 执行复制。
 
 # 数据库浏览（只读）
 
-启动工具箱后，在“数据准备”分组中打开“数据库浏览（只读）”，点击“打开 / 刷新”。
+启动工具箱后，在“现场数据”分组中打开“数据库浏览（只读）”，点击“打开 / 刷新”。
 默认读取 Cosmos 根目录的 `cosmos.db`，也可选择其他 SQLite 文件。
 
 - 支持选择数据表、按字段或全部字段搜索包含文本（区分大小写）、排序和每页 200 条分页。

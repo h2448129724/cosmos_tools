@@ -1,12 +1,12 @@
 """Image preview widget with zoom, pan, coordinate picker, and polygon ROI drawing."""
 import json
+from img_tools.ui.qt_image import bgr_to_qpixmap
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QPushButton, QTabWidget, QApplication, QFrame,
                                 QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QTimer
-from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QMouseEvent, QPainter,
+from PySide6.QtGui import (QPixmap, QWheelEvent, QMouseEvent, QPainter,
                            QPen, QColor, QBrush, QPolygonF)
-import cv2
 import numpy as np
 
 from cosmos_toolbox.ui.primitives import ActionBar, set_ui_role
@@ -15,23 +15,7 @@ from cosmos_toolbox.ui.theme import status_badge_stylesheet
 
 def cv2_to_qpixmap(img: np.ndarray | None) -> QPixmap:
     """Convert OpenCV image (BGR) to QPixmap for display."""
-    if img is None:
-        return QPixmap()
-    if len(img.shape) == 2:
-        h, w = img.shape
-        data = img.tobytes()
-        qimg = QImage(data, w, h, w, QImage.Format_Grayscale8)
-    elif img.shape[2] == 4:
-        h, w, _ = img.shape
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-        data = rgb.tobytes()
-        qimg = QImage(data, w, h, w * 4, QImage.Format_RGBA8888)
-    else:
-        h, w, _ = img.shape
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        data = rgb.tobytes()
-        qimg = QImage(data, w, h, w * 3, QImage.Format_RGB888)
-    return QPixmap.fromImage(qimg.copy())
+    return bgr_to_qpixmap(img)
 
 
 class ZoomableLabel(QWidget):

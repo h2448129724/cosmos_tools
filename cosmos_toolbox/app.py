@@ -8,8 +8,6 @@ from weakref import ref
 from PySide6.QtGui import QFont, QResizeEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
 
-from apps.cosmos_pipeline.outcome import PipelineOutcome, should_register_artifact
-
 from .capabilities import Capability, CapabilityCatalog, STAGE_TITLES
 from .default_capabilities import build_capability_catalog
 from .page_router import PageRouter
@@ -18,6 +16,7 @@ from .project_context import ProjectContext, ProjectState
 from .project_session import ArtifactKind, ProjectSession
 from .shell_widgets import ActivityHost, NavigationRail, ProjectHeader, ProjectInspector, TaskStatusStrip
 from .task_center import TaskCenter
+from .task_ledger import TaskStatus
 from .ui.theme import build_toolbox_stylesheet
 from .workbench_state import (
     WorkbenchEvent,
@@ -27,7 +26,6 @@ from .workbench_state import (
     transition_workbench,
 )
 from .workspaces import WorkspaceAdapter, default_workspace_adapters, request_shutdown
-from shared.conda_runtime import CondaEnvInfo, CondaEnvManager
 
 
 class _ToolboxRuntime:
@@ -57,14 +55,6 @@ class _ToolboxRuntime:
     def task_center(self) -> TaskCenter:
         return self.window.task_center
 
-    @property
-    def conda_environment(self) -> CondaEnvInfo | None:
-        return self.window.conda_manager.find(self.window.context.state.runtime_profile)
-
-    @property
-    def conda_manager(self) -> CondaEnvManager:
-        return self.window.conda_manager
-
     def open_capability(self, key: str) -> None:
         self.window.navigate(key)
 
@@ -79,7 +69,6 @@ class ToolboxWindow(QMainWindow):
         workspace_adapters: Sequence[WorkspaceAdapter] | None = None,
         initial_workspace: str = "overview",
         capability_catalog: CapabilityCatalog | None = None,
-        conda_manager: CondaEnvManager | None = None,
     ) -> None:
         super().__init__()
         using_default_workspaces = workspace_adapters is None
@@ -93,7 +82,6 @@ class ToolboxWindow(QMainWindow):
         session_path = self.context.state_path.with_name("project_session.json")
         self.project_session = ProjectSession(session_path, self)
         self.task_center = TaskCenter(self)
-        self.conda_manager = conda_manager or CondaEnvManager()
         self._runtime = _ToolboxRuntime(self)
         self._workspace_widgets: dict[str, QWidget] = {}
         self._native_widgets: dict[str, QWidget] = {}
@@ -141,8 +129,6 @@ class ToolboxWindow(QMainWindow):
             for index in range(self.navigation.count())
         }
         self.navigation.currentChanged.connect(self._on_navigation_changed)
-        self.navigation.runtimeProfileChanged.connect(self._on_runtime_profile_changed)
-        self._load_runtime_environments()
         body_layout.addWidget(self.navigation)
 
         work_area = QWidget()
@@ -161,7 +147,6 @@ class ToolboxWindow(QMainWindow):
         self.inspector = ProjectInspector()
         self.inspector.close_requested.connect(self._close_inspector)
         self.inspector.dataset_requested.connect(self._choose_dataset)
-        self.inspector.model_requested.connect(self._choose_model)
         self.inspector.image_dir_requested.connect(lambda: self._choose_directory("image_dir"))
         self.inspector.annotation_dir_requested.connect(lambda: self._choose_directory("annotation_dir"))
         self.inspector.output_root_requested.connect(lambda: self._choose_directory("output_root"))
@@ -184,7 +169,6 @@ class ToolboxWindow(QMainWindow):
         self.dataset_edit = self.inspector.dataset_edit
         self.image_dir_edit = self.inspector.image_dir_edit
         self.annotation_dir_edit = self.inspector.annotation_dir_edit
-        self.model_edit = self.inspector.model_edit
         self.output_root_edit = self.inspector.output_root_edit
         self.project_name_edit.editingFinished.connect(
             lambda: self.context.update(project_name=self.project_name_edit.text())
@@ -195,9 +179,6 @@ class ToolboxWindow(QMainWindow):
         )
         self.annotation_dir_edit.editingFinished.connect(
             lambda: self.context.update(annotation_dir=self.annotation_dir_edit.text())
-        )
-        self.model_edit.editingFinished.connect(
-            lambda: self.context.update(model_path=self.model_edit.text())
         )
         self.output_root_edit.editingFinished.connect(
             lambda: self.context.update(output_root=self.output_root_edit.text())
@@ -261,13 +242,8 @@ class ToolboxWindow(QMainWindow):
                 raise KeyError(f"No workspace adapter for capability: {capability.key}")
             widget = adapter.create(self.stack, self.context, self.page_router)
             self._workspace_widgets[adapter.key] = widget
-            self._bind_workspace_tasks(adapter.key, widget)
         self._stack_indexes[cache_key] = self.stack.addWidget(widget)
         return widget
-
-    def _bind_workspace_tasks(self, key: str, workspace: QWidget) -> None:
-        if key == "training" and hasattr(workspace, "run_manager"):
-            self.task_center.bind_training_manager(workspace.run_manager)
 
     def _return_to_workspace(self, key: str) -> None:
         capability_key = self._last_capability_for_workspace.get(key, key)
@@ -363,34 +339,7 @@ class ToolboxWindow(QMainWindow):
         if path:
             self.context.update(**{field: path})
 
-    def _choose_model(self) -> None:
-        start = self.context.state.model_path or self.context.state.output_root or str(TOOLBOX_ROOT)
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择当前模型",
-            start,
-            "模型 (*.onnx *.pth *.pt *.ckpt *.yaml);;所有文件 (*)",
-        )
-        if path:
-            self.context.update(model_path=path)
-
-    def _load_runtime_environments(self) -> None:
-        environments = self.conda_manager.list_envs()
-        selected_name = self.context.state.runtime_profile
-        if environments and self.conda_manager.find(selected_name) is None:
-            selected = next((item for item in environments if item.is_active), environments[0])
-            selected_name = selected.name
-            self.context.update(runtime_profile=selected_name)
-        self.navigation.set_runtime_environments(environments, selected_name)
-
-    def _on_runtime_profile_changed(self, name: str) -> None:
-        if not name or self.conda_manager.find(name) is None:
-            return
-        self.context.update(runtime_profile=name)
-        self.show_status(f"后续任务将使用 Conda 环境：{name}")
-
     def _on_context_changed(self, state: ProjectState) -> None:
-        self.navigation.set_runtime_profile(state.runtime_profile)
         self.project_header.apply_state(state)
         self.inspector.apply_state(state)
         apply_overview = getattr(self.overview, "apply_project_context", None)
@@ -412,21 +361,11 @@ class ToolboxWindow(QMainWindow):
         self.inspector.apply_artifacts(self.project_session.recent())
 
     def _on_task_finished(self, task) -> None:
-        try:
-            outcome = PipelineOutcome(task.status.value)
-        except (AttributeError, ValueError):
+        if getattr(task, "status", None) not in {TaskStatus.SUCCESS, TaskStatus.BUSINESS_NG}:
             return
-        has_output = bool(task.output_path)
-        output_exists = has_output and Path(task.output_path).exists()
-        already_registered = any(
-            item.source_task_id == task.task_id for item in self.project_session.artifacts
-        )
-        if not should_register_artifact(
-            outcome,
-            has_output=has_output,
-            output_exists=output_exists,
-            already_registered=already_registered,
-        ):
+        if not task.output_path or not Path(task.output_path).exists():
+            return
+        if any(item.source_task_id == task.task_id for item in self.project_session.artifacts):
             return
         self.project_session.register_artifact(
             kind=ArtifactKind.RUN_OUTPUT,

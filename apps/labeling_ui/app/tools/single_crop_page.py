@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from apps.data_tools.processing.batch_crop import crop_single_image
-from apps.data_tools.processing.image_io import read_image
+from img_tools.core.image_cache import ImagePrefetcher, neighbours
+from img_tools.ui.qt_image import bind_cache_to_widget
 from cosmos_toolbox.ui.primitives import PathField, set_ui_role
 from img_tools.core.crop_plan import CropRegion, allocate_crop_names, build_image_crop_plan
 from img_tools.core.fixed_roi import resolve_fixed_boxes, resize_fixed_box
@@ -44,6 +45,7 @@ class SingleCropPage(BaseToolPage):
         self._ref_w = 0
         self._ref_h = 0
         self._files: list[str] = []
+        self._images = bind_cache_to_widget(self, ImagePrefetcher())
         self._current_file_index = -1
         self._boxes: dict[str, tuple[tuple[int, int, int, int], ...]] = {}
         self._cropped: set[str] = set()
@@ -309,10 +311,11 @@ class SingleCropPage(BaseToolPage):
             self._save_current_boxes()
             previous = self._boxes.get(self._files[self._current_file_index])
         path = self._files[index]
-        img = read_image(path)
+        img = self._images.get(path)
         if img is None:
             QMessageBox.warning(self._mw, "提示", f"无法读取图片: {os.path.basename(path)}")
             return
+        self._images.prefetch(neighbours(self._files, index))
 
         self._showing = True
         try:

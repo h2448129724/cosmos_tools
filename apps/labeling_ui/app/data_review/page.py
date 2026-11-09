@@ -6,12 +6,17 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from img_tools.core.image_cache import ImagePrefetcher, neighbours
+from img_tools.ui.qt_image import bind_cache_to_widget
+from img_tools.core.image_io import read_image
 from img_tools.core.review_session import (
     ReviewSession,
     begin_review,
     clear_review_selection,
     plan_review_decision,
     select_review_index,
+    plan_review_undo,
+    restore_review_item,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -53,8 +58,7 @@ from cosmos_toolbox.ui.primitives import FlowLayout
 
 
 def read_image_bgr(path: Path) -> np.ndarray:
-    payload = np.fromfile(str(path), dtype=np.uint8)
-    image = cv2.imdecode(payload, cv2.IMREAD_COLOR)
+    image = read_image(path, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"无法读取图片: {path}")
     return image
@@ -91,6 +95,8 @@ class DatasetReviewPage(QWidget):
 
     reviewCompleted = Signal(object)
 
+    _UNDO_LIMIT = 50
+
     def __init__(
         self,
         parent=None,
@@ -104,6 +110,8 @@ class DatasetReviewPage(QWidget):
         self.preview_adapter = preview_adapter or ImageOnlyPreviewAdapter()
         self._session = ReviewSession()
         self.current_item: ReviewItem | None = None
+        self._undo_stack: list[tuple] = []
+        self._images = bind_cache_to_widget(self, ImagePrefetcher(lambda path: read_image(path, cv2.IMREAD_COLOR)))
         self.spec: ReviewSpec | None = None
         self.trash_dir: Path | None = None
         self._build_ui()
@@ -282,12 +290,15 @@ class DatasetReviewPage(QWidget):
         self.btn_accept = QPushButton("保留到目录  S")
         set_primary(self.btn_accept)
         self.btn_remove = QPushButton("移除  W")
+        self.btn_undo = QPushButton("撤销  Z")
+        self.btn_undo.setEnabled(False)
         self.btn_complete = QPushButton("完成审阅")
         for button, tip in (
             (self.btn_prev, "上一张（快捷键 A）"),
             (self.btn_next, "下一张（快捷键 D）"),
             (self.btn_accept, "保留当前样本（快捷键 S）"),
             (self.btn_remove, "移除当前样本（快捷键 W）"),
+            (self.btn_undo, "撤销上一次保留或移除（快捷键 Z）"),
             (self.btn_complete, "提交当前审阅结果"),
         ):
             button.setToolTip(tip)
@@ -321,6 +332,7 @@ class DatasetReviewPage(QWidget):
         self.btn_next.clicked.connect(lambda: self.jump_to_index(self.current_index + 1))
         self.btn_accept.clicked.connect(self.move_current_to_save)
         self.btn_remove.clicked.connect(self.move_current_to_trash)
+        self.btn_undo.clicked.connect(self.undo_last_decision)
         self.btn_complete.clicked.connect(self.complete_review)
         self._sync_mode_ui()
 
@@ -386,6 +398,8 @@ class DatasetReviewPage(QWidget):
             return
         self.spec = spec
         self._session = begin_review(collect_review_items(spec))
+        self._undo_stack.clear()
+        self.btn_undo.setEnabled(False)
         self.current_item = None
         self.trash_dir = None
         self.file_list.blockSignals(True)
@@ -414,7 +428,9 @@ class DatasetReviewPage(QWidget):
         item = selected.current_item
         assert item is not None
         try:
-            image = read_image_bgr(item.image_path)
+            image = self._images.get(item.image_path)
+            if image is None:
+                raise ValueError(f"无法读取图片: {item.image_path}")
             document = self.preview_adapter.load(item.image_path, item.annotation_path, image)
             summary = self.preview_adapter.summarize(document)
         except Exception as exc:
@@ -422,6 +438,7 @@ class DatasetReviewPage(QWidget):
             return
         self._session = selected
         self.current_item = item
+        self._images.prefetch(neighbours([entry.image_path for entry in self.items], selected.current_index))
         self.file_list.blockSignals(True)
         self.file_list.setCurrentRow(selected.current_index)
         self.file_list.blockSignals(False)
@@ -492,6 +509,7 @@ class DatasetReviewPage(QWidget):
         self.file_list.blockSignals(False)
         self._session = transition.session
         self.current_item = None
+        self._remember_decision(transition, moved, "accepted")
         self._show_after_removal(
             transition.removed_index,
             f"已保留: {', '.join(path.name for path in moved)}",
@@ -520,10 +538,44 @@ class DatasetReviewPage(QWidget):
         self.file_list.blockSignals(False)
         self._session = transition.session
         self.current_item = None
+        self._remember_decision(transition, moved, "removed")
         self._show_after_removal(
             transition.removed_index,
             f"已移除: {', '.join(path.name for path in moved)}",
         )
+
+    def _remember_decision(self, transition, moved: tuple[Path, ...], disposition: str) -> None:
+        sources = tuple(intent.source for intent in transition.intents)
+        self._undo_stack.append((transition.item, transition.removed_index, disposition, sources, moved))
+        del self._undo_stack[:-self._UNDO_LIMIT]
+        self.btn_undo.setEnabled(True)
+
+    def undo_last_decision(self) -> None:
+        if not self._undo_stack:
+            return
+        item, index, disposition, sources, moved = self._undo_stack[-1]
+        intents = tuple(
+            plan_review_undo(original_source=source, moved_target=target, decision=disposition)
+            for source, target in zip(sources, moved)
+        )
+        try:
+            restored = execute_review_intents(intents)
+        except Exception as exc:
+            QMessageBox.critical(self, "撤销失败", str(exc))
+            return
+        self._undo_stack.pop()
+        self.btn_undo.setEnabled(bool(self._undo_stack))
+        # A rename on conflict means the file came back under a new name.
+        restored_item = type(item)(restored[0], restored[1] if len(restored) > 1 else None)
+        self._session = restore_review_item(self._session, restored_item, index, disposition)
+        suffix = "" if restored_item.has_annotation else "  [无标注]"
+        self.file_list.blockSignals(True)
+        self.file_list.insertItem(self.current_index, f"{restored_item.image_path.name}{suffix}")
+        self.file_list.blockSignals(False)
+        position = self.current_index
+        self._session = clear_review_selection(self._session)
+        self.jump_to_index(position)
+        self.status_label.setText(f"已撤销：{restored_item.image_path.name}")
 
     def current_result(self) -> ReviewResult | None:
         spec = self.spec or self._make_spec()
@@ -556,6 +608,7 @@ class DatasetReviewPage(QWidget):
             Qt.Key_D: lambda: self.jump_to_index(self.current_index + 1),
             Qt.Key_S: self.move_current_to_save,
             Qt.Key_W: self.move_current_to_trash,
+            Qt.Key_Z: self.undo_last_decision,
         }
         handler = handlers.get(event.key())
         if handler is not None:

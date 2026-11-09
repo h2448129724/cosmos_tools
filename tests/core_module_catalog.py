@@ -40,20 +40,10 @@ CORE_MODULES: tuple[CoreModule, ...] = (
     CoreModule("cosmos_toolbox.task_presentation", "cosmos_toolbox/task_presentation.py"),
     CoreModule("cosmos_toolbox.layout_presentation", "cosmos_toolbox/layout_presentation.py"),
     CoreModule("cosmos_toolbox.workbench_state", "cosmos_toolbox/workbench_state.py"),
-    CoreModule("cosmos_toolbox.cabf_calibration", "cosmos_toolbox/cabf_calibration.py"),
-    CoreModule("cosmos_toolbox.training.model_resolution", "cosmos_toolbox/training/model_resolution.py"),
     CoreModule("img_tools.core.crop_plan", "img_tools/core/crop_plan.py"),
     CoreModule("img_tools.core.fixed_roi", "img_tools/core/fixed_roi.py"),
-    CoreModule("trainer_gui.run_plan", "trainer_gui/run_plan.py"),
-    CoreModule("apps.cabf_flow.annotation_source_core", "apps/cabf_flow/annotation_source_core.py"),
     CoreModule("apps.cabf_flow.plan", "apps/cabf_flow/plan.py"),
-    CoreModule("apps.cosmos_pipeline.outcome", "apps/cosmos_pipeline/outcome.py"),
-    CoreModule("apps.cosmos_pipeline.request_plan", "apps/cosmos_pipeline/request_plan.py"),
     CoreModule("apps.point_marking.point_core", "apps/point_marking/point_core.py"),
-    CoreModule("modules.sew_point.inference_core", "modules/sew_point/inference_core.py"),
-    CoreModule("modules.sew_point_conntect.evaluation_core", "modules/sew_point_conntect/evaluation_core.py"),
-    CoreModule("modules.sew_point_conntect.inference_core", "modules/sew_point_conntect/inference_core.py"),
-    CoreModule("modules.yolo.action_plan", "modules/yolo/action_plan.py"),
 )
 
 

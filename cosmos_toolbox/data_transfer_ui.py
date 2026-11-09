@@ -97,6 +97,7 @@ class DataTransferPage(QWidget):
         hint = QLabel('先将数据库导出为 Excel，再在能访问原图的电脑上提取 NG 图片。也可直接使用已有 Excel。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        self.header_widgets = (title, hint)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
@@ -271,7 +272,7 @@ class DataTransferPage(QWidget):
         if self.task_center is not None:
             self._task_id = 'data-transfer-' + uuid4().hex[:12]
             title = {'export': '数据库导出 Excel', 'check': 'Excel NG：检查', 'copy': 'Excel NG：复制'}[operation]
-            self.task_center.start(self._task_id, title, 'data.transfer', options['output'] if operation != 'check' else '',
+            self.task_center.start(self._task_id, title, 'data.ng_extract', options['output'] if operation != 'check' else '',
                                    cancel=self._stop if operation != 'export' else None)
         self.worker.start()
 

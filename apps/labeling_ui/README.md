@@ -1,26 +1,11 @@
 # Labeling UI
 
-来源：
+工具箱中标注与数据整理相关的页面代码，全部由项目工作台挂载，不再提供独立启动的窗口。
 
-- 由原 `img_tools/gui` 与入口 `main.py` 迁入
+- `app/tools/workflow_page.py`：CAB-F 四步流程（数据集准备 → 数据筛选 → 点边标注 → 校验与导出）。
+- `app/graph_annotation_dialog.py`：点边一体标注器。
+- `app/data_review/`：样本审阅（保留 / 移除 / 撤销），CAB-F 流程的数据筛选也复用它。
+- `app/dataset_export_panel.py`：校验与点 / 连边数据集导出面板。
+- `app/tools/`：裁剪、分块、关键字划分、内侧 Mask、通用 YAML ROI、标注可视化、点位标注导出等页面。
 
-当前职责：
-
-- 点边一体标注
-- 数据筛选
-- 数据集校验与导出对话框
-- 9 步 CABF 流程页面
-
-启动方式：
-
-```bash
-python D:/project/tianwei/train_model/scripts/labeling_ui.py
-python -m apps.labeling_ui
-```
-
-说明：
-
-- 当前已经改为包内导入与 `apps.data_tools.*` 依赖
-- 启动脚本只负责补上 `shared/cabf_common` 的导入根
-- 可以直接作为 monorepo 内的应用包运行
-- UI 主代码现在位于 `apps/labeling_ui/app`
+图片读写统一使用 `img_tools.core.image_io`。

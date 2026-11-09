@@ -1,77 +1,13 @@
 from __future__ import annotations
 
 from typing import Callable
-from weakref import ref
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal
 
 from .task_ledger import TaskLedger, TaskRecord, TaskStatus
 from .task_presentation import TaskPresentation, present_task
 
 __all__ = ["TaskCenter", "TaskLedger", "TaskRecord", "TaskPresentation", "TaskStatus"]
-
-
-class _TrainingTaskBridge(QObject):
-    """Queue RunManager facts onto the TaskCenter object's Qt thread."""
-
-    def __init__(
-        self,
-        center: "TaskCenter",
-        manager: QObject,
-        key_for: Callable[[object], str],
-    ) -> None:
-        super().__init__(center)
-        self._center_ref = ref(center)
-        self._manager_ref = ref(manager)
-        self._key_for = key_for
-
-    @Slot(object)
-    def started(self, record: object) -> None:
-        center = self._center_ref()
-        manager = self._manager_ref()
-        if center is None or manager is None:
-            return
-        run_id = str(getattr(record, "run_id"))
-        title = (
-            f"{getattr(record, 'action_display_name', '运行')} · "
-            f"{getattr(record, 'feature_name', '')}"
-        )
-        stop_run = getattr(manager, "stop_run", None)
-
-        def cancel(target: str = run_id, manager_ref=self._manager_ref) -> None:
-            current_manager = manager_ref()
-            current_stop = getattr(current_manager, "stop_run", None)
-            if callable(current_stop):
-                current_stop(target)
-
-        center.start(
-            run_id,
-            title,
-            self._key_for(record),
-            str(getattr(record, "artifacts_dir", "") or getattr(record, "output_dir", "")),
-            cancel=cancel if callable(stop_run) else None,
-        )
-
-    @Slot(str, str, str)
-    def logged(self, run_id: str, stream: str, line: str) -> None:
-        center = self._center_ref()
-        if center is not None:
-            center.log(str(run_id), line, stream)
-
-    @Slot(object)
-    def finished(self, record: object) -> None:
-        center = self._center_ref()
-        if center is None:
-            return
-        raw_status = str(getattr(record, "status", "failed"))
-        status = {
-            "success": TaskStatus.SUCCESS,
-            "business_ng": TaskStatus.BUSINESS_NG,
-            "stopped": TaskStatus.STOPPED,
-            "failed": TaskStatus.FAILED,
-        }.get(raw_status, TaskStatus.FAILED)
-        output = str(getattr(record, "artifacts_dir", "") or getattr(record, "output_dir", ""))
-        center.finish(str(getattr(record, "run_id")), status, output)
 
 
 class TaskCenter(QObject):
@@ -89,7 +25,6 @@ class TaskCenter(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._ledger = TaskLedger.empty()
-        self._training_bridges: dict[int, _TrainingTaskBridge] = {}
         self._cancel_callbacks: dict[str, Callable[[], None]] = {}
 
     @property
@@ -173,20 +108,3 @@ class TaskCenter(QObject):
         assert task is not None
         self.changed.emit()
         self.task_finished.emit(task)
-
-    def bind_training_manager(
-        self,
-        manager: QObject,
-        capability_key: Callable[[object], str] | None = None,
-    ) -> None:
-        """Adapt trainer RunManager signals into the shared task interface."""
-
-        identity = id(manager)
-        if identity in self._training_bridges:
-            return
-        key_for = capability_key or (lambda record: f"training.{getattr(record, 'feature_name', 'unknown')}")
-        bridge = _TrainingTaskBridge(self, manager, key_for)
-        self._training_bridges[identity] = bridge
-        manager.run_started.connect(bridge.started)
-        manager.log_received.connect(bridge.logged)
-        manager.run_finished.connect(bridge.finished)

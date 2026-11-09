@@ -2,8 +2,7 @@
 """从 Cosmos 导出的 Excel 中提取 NG 原始图，复制到指定目录。
 
 在可以访问 E 盘图片的电脑上执行（依赖 openpyxl）：
-    conda activate onnx-gpu
-    python scripts/copy_ng_images.py --excel "C:/Users/tianwei/Desktop/cosmos.xlsx" --output "D:/NG_recheck"
+    python scripts/copy_ng_images.py --excel "D:/data/cosmos.xlsx" --output "D:/NG_recheck"
 
 默认：inspection_result.ok 为 0 的记录 -> image_file.result_id -> filename 中的 E 盘原图。
 filename 没有指定盘符的路径时，再使用 raw_image；绝不使用 result_image。

@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from uuid import uuid4
 
-import cv2
-from PySide6.QtCore import QSize, QThread, Qt, Signal
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImageReader, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -28,19 +25,10 @@ from PySide6.QtWidgets import (
 
 from apps.labeling_ui.app.preview_widget import ZoomableLabel, cv2_to_qpixmap
 
-from .cabf_config import (
-    CabfConfigDocument,
-    CabfConfigError,
-    CabfTemplateGenerator,
-    RoiField,
-    TemplateGenerationResult,
-    write_reference,
-    write_template,
-)
+from .cabf_config import CabfConfigDocument, CabfConfigError, RoiField
 from .capabilities import CapabilityRuntime
 from .paths import COSMOS_ROOT
 from .project_context import ProjectState
-from .task_center import TaskStatus
 from .ui.primitives import ActionBar, SectionSurface, StatusBanner
 
 
@@ -76,41 +64,17 @@ def _load_preview_pixmap(path: str | Path) -> tuple[QPixmap, tuple[int, int]]:
     return QPixmap.fromImage(image), (width, height)
 
 
-def _template_preview_pixmap(image) -> QPixmap:
-    height, width = image.shape[:2]
-    scale = min(1.0, _MAX_PREVIEW_DIMENSION / max(width, height))
-    preview = image
-    if scale < 1.0:
-        preview = cv2.resize(
-            image,
-            (max(1, round(width * scale)), max(1, round(height * scale))),
-            interpolation=cv2.INTER_AREA,
-        )
-    return cv2_to_qpixmap(preview)
-
-
-class _TemplateWorker(QThread):
-    completed = Signal(object)
-
-    def __init__(self, generator: CabfTemplateGenerator, image_path: str, parent=None) -> None:
-        super().__init__(parent)
-        self.generator = generator
-        self.image_path = image_path
-
-    def run(self) -> None:
-        try:
-            self.completed.emit(self.generator.generate_from_path(self.image_path))
-        except Exception as exc:  # pragma: no cover - exercised through the UI slot
-            self.completed.emit(exc)
-
-
 def _card(title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
     surface = SectionSurface(title, subtitle)
     return surface, surface.body_layout
 
 
 class CabfConfigActivity(QWidget):
-    """Native CAB-F configuration, reference-image, template and ROI workspace."""
+    """CAB-F YAML ROI editor on the full-size calibration reference image.
+
+    Reference images and match templates are produced by the production tools;
+    this page only views them and edits ROI coordinates.
+    """
 
     capability_key = "cabf.config_studio"
 
@@ -118,19 +82,12 @@ class CabfConfigActivity(QWidget):
         super().__init__(parent)
         self.runtime = runtime
         self.document: CabfConfigDocument | None = None
-        self._source_paths = {"top": "", "bottom": ""}
-        self._source_sizes: dict[str, tuple[int, int] | None] = {"top": None, "bottom": None}
         self._reference_paths = {"top": "", "bottom": ""}
         self._reference_sizes: dict[str, tuple[int, int] | None] = {"top": None, "bottom": None}
-        self._generated_templates: dict[str, TemplateGenerationResult | None] = {"top": None, "bottom": None}
         self._visible_fields: list[RoiField] = []
         self._rect_map: list[tuple[RoiField, int]] = []
         self._canvas_to_source_scale = (1.0, 1.0)
         self._syncing_canvas = False
-        self._generator = CabfTemplateGenerator()
-        self._worker: _TemplateWorker | None = None
-        self._task_id = ""
-        self._task_side = ""
         self._applying_project_context = False
         self._build_ui()
         self.apply_project_context(self.runtime.project_context.state)
@@ -153,10 +110,6 @@ class CabfConfigActivity(QWidget):
         self._applying_project_context = True
         try:
             for side in ("top", "bottom"):
-                source = str(getattr(state, f"cabf_source_{side}", "") or "")
-                if source != self._source_paths[side]:
-                    self._source_paths[side] = source
-                    self._source_sizes[side] = None
                 reference = str(getattr(state, f"cabf_reference_{side}", "") or "")
                 if reference != self._reference_paths[side]:
                     self._reference_paths[side] = reference
@@ -180,7 +133,7 @@ class CabfConfigActivity(QWidget):
 
         context_card, context_layout = _card(
             "CAB-F 配置上下文",
-            "先选择产品 YAML 和初始原图；工具会同时生成全尺寸校准基准图和半尺寸匹配模板。",
+            "选择产品 YAML，再为每个侧别选择全尺寸校准基准图；ROI 坐标基于该图。",
         )
         config_row = ActionBar()
         self.config_edit = QLineEdit()
@@ -210,12 +163,12 @@ class CabfConfigActivity(QWidget):
         context_controls.add_widget(self.side_combo)
         self.source_edit = QLineEdit()
         self.source_edit.setReadOnly(True)
-        self.source_edit.setPlaceholderText("请选择当前侧别的初始原图")
-        self.source_edit.setAccessibleName("当前侧别初始原图")
+        self.source_edit.setPlaceholderText("请选择当前侧别的校准基准图")
+        self.source_edit.setAccessibleName("当前侧别校准基准图")
         self.source_edit.setMinimumWidth(280)
         context_controls.add_widget(self.source_edit)
-        choose_source = QPushButton("选择初始原图")
-        choose_source.clicked.connect(self._pick_source)
+        choose_source = QPushButton("选择校准基准图")
+        choose_source.clicked.connect(self._pick_reference)
         context_controls.add_widget(choose_source)
         context_layout.addWidget(context_controls)
         layout.addWidget(context_card)
@@ -253,7 +206,6 @@ class CabfConfigActivity(QWidget):
         canvas_toolbar.add_widget(self.inspector_toggle)
         canvas_toolbar.add_widget(QLabel("图层"))
         self.view_combo = QComboBox()
-        self.view_combo.addItem("初始原图（输入）", "source")
         self.view_combo.addItem("校准基准图 + YAML ROI", "reference")
         self.view_combo.addItem("匹配模板", "template")
         self.view_combo.currentIndexChanged.connect(self._rebuild_canvas)
@@ -262,7 +214,7 @@ class CabfConfigActivity(QWidget):
         fit_button = QPushButton("适应窗口")
         fit_button.clicked.connect(self._fit_canvas)
         canvas_toolbar.add_widget(fit_button)
-        self.canvas_badge = QLabel("未选择原图")
+        self.canvas_badge = QLabel("未选择基准图")
         self.canvas_badge.setObjectName("cabfBadge")
         canvas_toolbar.add_widget(self.canvas_badge)
         canvas_layout.addWidget(canvas_toolbar)
@@ -271,7 +223,7 @@ class CabfConfigActivity(QWidget):
         self.preview.rectsChanged.connect(self._sync_rects_from_canvas)
         self.preview.rectSelectionChanged.connect(self._select_field_from_canvas)
         canvas_layout.addWidget(self.preview, 1)
-        self.canvas_meta = QLabel("选择初始原图后生成两种 CAB-F 图像。")
+        self.canvas_meta = QLabel("选择校准基准图后在画布中查看和编辑 ROI。")
         self.canvas_meta.setObjectName("cabfMuted")
         self.canvas_meta.setWordWrap(True)
         canvas_layout.addWidget(self.canvas_meta)
@@ -298,17 +250,13 @@ class CabfConfigActivity(QWidget):
         inspector_surface_layout.addWidget(self.inspector_scroll, 1)
         template_form = QFormLayout()
         template_form.setContentsMargins(0, 0, 0, 0)
-        self.model_label = QLabel("由 assets/config/backend_config.yaml 自动读取")
-        self.model_label.setWordWrap(True)
-        self.model_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.template_path_label = QLabel("未读取")
         self.template_path_label.setWordWrap(True)
         self.template_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.reference_path_label = QLabel("尚未生成")
+        self.reference_path_label = QLabel("尚未选择")
         self.reference_path_label.setWordWrap(True)
         self.reference_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         for value_label in (
-            self.model_label,
             self.template_path_label,
             self.reference_path_label,
         ):
@@ -317,40 +265,17 @@ class CabfConfigActivity(QWidget):
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Preferred,
             )
-        template_form.addRow("胶体模型", self.model_label)
         template_form.addRow("校准基准图", self.reference_path_label)
         template_form.addRow("匹配模板", self.template_path_label)
         inspector_layout.addLayout(template_form)
 
         self.image_purpose_label = QLabel(
             "校准基准图：全尺寸彩色标准坐标图，YAML ROI 在此图上查看和编辑。\n"
-            "匹配模板：半尺寸二值胶体图，生产推理用它计算现场图的平移与旋转，不承载 ROI。"
+            "匹配模板：半尺寸二值胶体图，只读预览，不承载 ROI。"
         )
         self.image_purpose_label.setObjectName("cabfMuted")
         self.image_purpose_label.setWordWrap(True)
         inspector_layout.addWidget(self.image_purpose_label)
-
-        template_actions = ActionBar()
-        self.generate_button = QPushButton("生成两种图")
-        self.generate_button.setProperty("buttonRole", "primary")
-        self.generate_button.clicked.connect(self._generate_template)
-        self.save_reference_button = QPushButton("保存校准基准图")
-        self.save_reference_button.clicked.connect(self._save_reference)
-        self.save_reference_button.setEnabled(False)
-        self.save_template_button = QPushButton("保存匹配模板")
-        self.save_template_button.clicked.connect(self._save_template)
-        self.save_template_button.setEnabled(False)
-        template_actions.add_widget(self.generate_button)
-        template_actions.add_widget(self.save_reference_button)
-        template_actions.add_widget(self.save_template_button)
-        inspector_layout.addWidget(template_actions)
-        self.update_config_check = QCheckBox("保存后更新模板路径")
-        self.update_config_check.setToolTip("保存后更新 inspection.match_template")
-        self.update_config_check.setAccessibleDescription(
-            "保存后更新 inspection.match_template"
-        )
-        self.update_config_check.setChecked(True)
-        inspector_layout.addWidget(self.update_config_check)
 
         roi_title = QLabel("当前字段坐标")
         roi_title.setObjectName("cabfSectionTitle")
@@ -377,7 +302,7 @@ class CabfConfigActivity(QWidget):
         self.save_roi_button.setEnabled(False)
         inspector_layout.addWidget(self.save_roi_button)
 
-        self.validation_label = QLabel("等待配置与原图。")
+        self.validation_label = QLabel("等待配置与校准基准图。")
         self.validation_label.setObjectName("cabfValidation")
         self.validation_label.setWordWrap(True)
         inspector_layout.addWidget(self.validation_label)
@@ -441,16 +366,12 @@ class CabfConfigActivity(QWidget):
             self._load_config()
 
     def _load_config(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self.status_label.setText("模板生成期间不能切换配置。")
-            return
         try:
             self.document = CabfConfigDocument.load(self.config_edit.text().strip())
         except Exception as exc:
             self._show_error("配置加载失败", exc)
             return
         self.product_badge.setText(self.document.project_name)
-        self._generated_templates = {"top": None, "bottom": None}
         self._refresh_side_state()
         self.status_label.setText(f"已加载配置：{self.document.path}")
         if not self._applying_project_context:
@@ -461,15 +382,12 @@ class CabfConfigActivity(QWidget):
                     updates[f"cabf_template_{side}"] = str(template)
             self.runtime.project_context.update(**updates)
 
-    def _pick_source(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self.status_label.setText("图像生成期间不能更换初始原图。")
-            return
-        current = self._source_paths[self.side]
-        start = str(Path(current).parent) if current else str(COSMOS_ROOT)
+    def _pick_reference(self) -> None:
+        current = self._reference_paths[self.side]
+        start = str(Path(current).parent) if current else str(COSMOS_ROOT / "conf")
         path, _ = QFileDialog.getOpenFileName(
             self,
-            f"选择 {self.side.upper()} 初始原图",
+            f"选择 {self.side.upper()} 校准基准图",
             start,
             "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)",
         )
@@ -478,36 +396,25 @@ class CabfConfigActivity(QWidget):
         try:
             pixmap, (width, height) = _load_preview_pixmap(path)
         except Exception as exc:
-            self._show_error("初始原图加载失败", exc)
+            self._show_error("校准基准图加载失败", exc)
             return
-        self._source_paths[self.side] = str(Path(path).resolve())
-        self._source_sizes[self.side] = (width, height)
-        self._reference_paths[self.side] = ""
-        self._reference_sizes[self.side] = None
-        self.runtime.project_context.update(
-            **{
-                f"cabf_source_{self.side}": self._source_paths[self.side],
-                f"cabf_reference_{self.side}": "",
-            }
-        )
-        self.source_edit.setText(self._source_paths[self.side])
-        self.reference_path_label.setText("尚未生成")
-        self._generated_templates[self.side] = None
-        self.view_combo.setCurrentIndex(0)
-        self._set_source_canvas(pixmap)
+        self._reference_paths[self.side] = str(Path(path).resolve())
+        self._reference_sizes[self.side] = (width, height)
+        self.runtime.project_context.update(**{f"cabf_reference_{self.side}": self._reference_paths[self.side]})
+        self.source_edit.setText(self._reference_paths[self.side])
+        self.reference_path_label.setText(self._reference_paths[self.side])
+        self.view_combo.setCurrentIndex(self.view_combo.findData("reference"))
+        self._set_reference_canvas(pixmap)
         self._refresh_validation()
-        self.status_label.setText(f"已选择 {self.side.upper()} 初始原图：{Path(path).name}；请生成两种图。")
+        self.status_label.setText(f"已选择 {self.side.upper()} 校准基准图：{Path(path).name}")
 
     def _switch_side(self) -> None:
         self.edit_roi_button.setChecked(False)
         self._refresh_side_state()
 
     def _refresh_side_state(self) -> None:
-        self.source_edit.setText(self._source_paths[self.side])
-        self.reference_path_label.setText(self._reference_paths[self.side] or "尚未生成")
-        generated = self._generated_templates[self.side]
-        self.save_reference_button.setEnabled(generated is not None and generated.calibrated_image is not None)
-        self.save_template_button.setEnabled(generated is not None)
+        self.source_edit.setText(self._reference_paths[self.side])
+        self.reference_path_label.setText(self._reference_paths[self.side] or "尚未选择")
         if self.document is None:
             self.field_list.clear()
             self.template_path_label.setText("未读取")
@@ -542,36 +449,12 @@ class CabfConfigActivity(QWidget):
                 self.roi_list.addItem(f"ROI {index}  ·  ({x1}, {y1}) → ({x2}, {y2})")
         self.roi_list.blockSignals(False)
 
-    def _set_source_canvas(self, pixmap: QPixmap | None = None) -> None:
-        path = self._source_paths[self.side]
-        if not path:
-            self._set_canvas_pixmap(None)
-            self.canvas_badge.setText("未选择初始图")
-            self.canvas_meta.setText("请先选择当前侧别的初始原图。")
-            return
-        if pixmap is None:
-            try:
-                pixmap, (width, height) = _load_preview_pixmap(path)
-            except Exception as exc:
-                self._set_canvas_pixmap(None)
-                self.canvas_meta.setText(str(exc))
-                return
-            self._source_sizes[self.side] = (width, height)
-        width, height = self._source_sizes[self.side] or (0, 0)
-        self._set_canvas_pixmap(pixmap, logical_size=(width, height))
-        self.canvas_badge.setText(f"初始图 {width}×{height}")
-        self.canvas_meta.setText(f"{self.side.upper()} 未校准输入图；该图不承载 YAML ROI · {path}")
-
     def _set_reference_canvas(self, pixmap: QPixmap | None = None) -> None:
-        result = self._generated_templates[self.side]
-        if pixmap is None and result is not None and result.calibrated_image is not None:
-            pixmap = _template_preview_pixmap(result.calibrated_image)
-            self._reference_sizes[self.side] = result.source_size
         path = self._reference_paths[self.side]
         if pixmap is None and not path:
             self._set_canvas_pixmap(None)
-            self.canvas_badge.setText("未生成基准图")
-            self.canvas_meta.setText("请先从初始原图生成全尺寸校准基准图。")
+            self.canvas_badge.setText("未选择基准图")
+            self.canvas_meta.setText("请先选择当前侧别的全尺寸校准基准图。")
             return
         if pixmap is None:
             try:
@@ -589,9 +472,8 @@ class CabfConfigActivity(QWidget):
         preview_note = ""
         if pixmap.width() != width or pixmap.height() != height:
             preview_note = f" · 画布预览 {pixmap.width()}×{pixmap.height()}，坐标自动映射到原图"
-        source_text = path or "尚未保存"
         self.canvas_meta.setText(
-            f"{self.side.upper()} 校准后全尺寸标准坐标系{preview_note} · YAML ROI 仅属于此图 · {source_text}"
+            f"{self.side.upper()} 校准后全尺寸标准坐标系{preview_note} · YAML ROI 仅属于此图 · {path}"
         )
 
     def _set_canvas_pixmap(self, pixmap: QPixmap | None, *, logical_size: tuple[int, int] | None = None) -> None:
@@ -608,21 +490,8 @@ class CabfConfigActivity(QWidget):
 
     def _rebuild_canvas(self) -> None:
         view = str(self.view_combo.currentData())
-        if view == "source":
-            self.edit_roi_button.setChecked(False)
-            self._set_source_canvas()
-            return
         if view == "template":
             self.edit_roi_button.setChecked(False)
-            result = self._generated_templates[self.side]
-            if result is not None:
-                self._set_canvas_pixmap(_template_preview_pixmap(result.image))
-                width, height = result.template_size
-                self.canvas_badge.setText(f"新模板 {width}×{height}")
-                self.canvas_meta.setText(
-                    "半尺寸二值匹配模板：生产推理用它计算现场图的平移与旋转；不叠加 YAML ROI。"
-                )
-                return
             template_path = self.document.template_path(self.side) if self.document else None
             if template_path and template_path.exists():
                 try:
@@ -637,7 +506,7 @@ class CabfConfigActivity(QWidget):
                 return
             self._set_canvas_pixmap(None)
             self.canvas_badge.setText("无匹配模板")
-            self.canvas_meta.setText("当前侧别尚未生成或配置匹配模板。")
+            self.canvas_meta.setText("当前侧别的 YAML 没有配置匹配模板，或模板文件不存在。")
             return
         self._set_reference_canvas()
         self._refresh_validation()
@@ -739,15 +608,12 @@ class CabfConfigActivity(QWidget):
         )
 
     def _toggle_roi_editing(self, enabled: bool) -> None:
-        result = self._generated_templates[self.side]
-        has_reference = bool(self._reference_paths[self.side]) or bool(
-            result is not None and result.calibrated_image is not None
-        )
+        has_reference = bool(self._reference_paths[self.side])
         if enabled and (not has_reference or self.document is None):
             self.edit_roi_button.blockSignals(True)
             self.edit_roi_button.setChecked(False)
             self.edit_roi_button.blockSignals(False)
-            self.status_label.setText("请先加载配置并生成校准基准图。")
+            self.status_label.setText("请先加载配置并选择校准基准图。")
             return
         if enabled and str(self.view_combo.currentData()) != "reference":
             self.view_combo.setCurrentIndex(self.view_combo.findData("reference"))
@@ -786,139 +652,6 @@ class CabfConfigActivity(QWidget):
             return
         self.status_label.setText(f"ROI 已保存：{self.document.path}")
 
-    def _generate_template(self) -> None:
-        image_path = self._source_paths[self.side]
-        if not image_path:
-            self.status_label.setText("请先选择当前侧别的初始原图。")
-            return
-        if self._worker is not None and self._worker.isRunning():
-            return
-        self._task_id = f"cabf-template-{uuid4().hex[:10]}"
-        self._task_side = self.side
-        center = self.runtime.task_center
-        center.start(self._task_id, f"生成 {self._task_side.upper()} CAB-F 校准基准图与匹配模板", self.capability_key)
-        center.log(self._task_id, f"初始原图：{image_path}")
-        center.log(self._task_id, "模型来源：assets/config/backend_config.yaml → cab_f.glue_segment.path")
-        self.generate_button.setEnabled(False)
-        self.status_label.setText("正在生成全尺寸校准基准图和半尺寸匹配模板；日志已进入任务中心。")
-        self._worker = _TemplateWorker(self._generator, image_path, self)
-        self._worker.completed.connect(self._template_completed)
-        self._worker.finished.connect(self._template_thread_finished)
-        self._worker.start()
-
-    def _template_completed(self, result: object) -> None:
-        center = self.runtime.task_center
-        if isinstance(result, Exception):
-            center.log(self._task_id, str(result), "stderr")
-            center.finish(self._task_id, TaskStatus.FAILED)
-            self.status_label.setText(f"模板生成失败：{result}")
-            return
-        assert isinstance(result, TemplateGenerationResult)
-        if result.calibrated_image is None:
-            error = CabfConfigError("生成结果缺少全尺寸校准基准图")
-            center.log(self._task_id, str(error), "stderr")
-            center.finish(self._task_id, TaskStatus.FAILED)
-            self.status_label.setText(str(error))
-            return
-        target_side = self._task_side
-        self._generated_templates[target_side] = result
-        self._reference_sizes[target_side] = result.source_size
-        self.model_label.setText(result.model_path)
-        center.log(self._task_id, f"模板尺寸：{result.template_size[0]}×{result.template_size[1]}")
-        center.log(self._task_id, f"校准基准图尺寸：{result.source_size[0]}×{result.source_size[1]}")
-        center.log(self._task_id, f"全尺寸校准偏移（行, 列）：{result.calibration_offset}")
-        center.finish(self._task_id, TaskStatus.SUCCESS)
-        if self.side == target_side:
-            self.save_template_button.setEnabled(True)
-            self.save_reference_button.setEnabled(True)
-            self.view_combo.setCurrentIndex(self.view_combo.findData("reference"))
-            self._rebuild_canvas()
-            self._refresh_validation()
-            self.status_label.setText("两种图已生成；请分别保存校准基准图和匹配模板。")
-        else:
-            self.status_label.setText(f"{target_side.upper()} 两种图已生成；切回该侧别后可以预览和保存。")
-
-    def _template_thread_finished(self) -> None:
-        self.generate_button.setEnabled(True)
-        worker = self._worker
-        self._worker = None
-        if worker is not None:
-            worker.deleteLater()
-
-    def _save_template(self) -> None:
-        result = self._generated_templates[self.side]
-        if result is None:
-            return
-        configured = self.document.template_path(self.side) if self.document else None
-        start = str(configured or (COSMOS_ROOT / "conf" / f"CAB_F_template_{self.side}.png"))
-        path, _ = QFileDialog.getSaveFileName(self, "保存 CAB-F 匹配模板", start, "PNG (*.png)")
-        if not path:
-            return
-        target = Path(path)
-        if target.suffix.lower() != ".png":
-            target = target.with_suffix(".png")
-        try:
-            previous_template = target.read_bytes() if target.exists() else None
-        except OSError as exc:
-            self._show_error("模板保存失败", exc)
-            return
-        if self.update_config_check.isChecked():
-            if self.document is None:
-                self._show_error("模板保存失败", CabfConfigError("尚未加载 CAB-F 配置，无法更新 match_template"))
-                return
-            # Validate the YAML patch before creating the output file.  This
-            # prevents an invalid config from leaving an orphan generated
-            # template behind.
-            try:
-                self.document.validate_template_path_update(self.side, target)
-            except Exception as exc:
-                self._show_error("模板保存失败", exc)
-                return
-        template_written = False
-        try:
-            saved = write_template(path, result.image)
-            template_written = True
-            if self.update_config_check.isChecked():
-                assert self.document is not None
-                self.document.update_template_path(self.side, saved)
-                self.template_path_label.setText(str(saved))
-        except Exception as exc:
-            # ``write_template`` may have created/overwritten the file before
-            # a later YAML update fails.  Restore the exact prior bytes or
-            # remove only the newly-created target, never an unrelated file.
-            if template_written:
-                try:
-                    if previous_template is None:
-                        target.unlink(missing_ok=True)
-                    else:
-                        target.write_bytes(previous_template)
-                except OSError as rollback_exc:
-                    exc = CabfConfigError(f"模板配置失败且无法回滚模板文件：{rollback_exc}")
-            self._show_error("模板保存失败", exc)
-            return
-        self.runtime.project_context.update(**{f"cabf_template_{self.side}": str(saved)})
-        self.status_label.setText(f"匹配模板已保存：{saved}")
-
-    def _save_reference(self) -> None:
-        result = self._generated_templates[self.side]
-        if result is None or result.calibrated_image is None:
-            return
-        configured = self._reference_paths[self.side]
-        start = str(configured or (COSMOS_ROOT / "conf" / f"CAB_F_reference_{self.side}.png"))
-        path, _ = QFileDialog.getSaveFileName(self, "保存 CAB-F 全尺寸校准基准图", start, "PNG (*.png)")
-        if not path:
-            return
-        try:
-            saved = write_reference(path, result.calibrated_image)
-        except Exception as exc:
-            self._show_error("校准基准图保存失败", exc)
-            return
-        self._reference_paths[self.side] = str(saved)
-        self._reference_sizes[self.side] = result.source_size
-        self.reference_path_label.setText(str(saved))
-        self.runtime.project_context.update(**{f"cabf_reference_{self.side}": str(saved)})
-        self.status_label.setText(f"全尺寸校准基准图已保存：{saved}")
-
     def _refresh_validation(self) -> None:
         if self.document is None:
             self.validation_label.setText("等待 CAB-F 配置。")
@@ -926,7 +659,7 @@ class CabfConfigActivity(QWidget):
             return
         size = self._reference_sizes[self.side]
         if size is None:
-            self.validation_label.setText("已读取配置；生成或加载校准基准图后检查 YAML ROI 边界。")
+            self.validation_label.setText("已读取配置；选择校准基准图后检查 YAML ROI 边界。")
             self.save_roi_button.setEnabled(False)
             return
         issues = self.document.validate_rois(self.side, size)
@@ -966,14 +699,3 @@ class CabfConfigActivity(QWidget):
     def _show_error(self, title: str, exc: Exception) -> None:
         self.status_label.setText(f"{title}：{exc}")
         QMessageBox.critical(self, title, str(exc))
-
-    def shutdown(self) -> None:
-        """Wait for an in-flight ONNX task before the owning Qt window is destroyed."""
-        worker = self._worker
-        if worker is None or not worker.isRunning():
-            return
-        worker.requestInterruption()
-        worker.wait()
-        task = self.runtime.task_center.get(self._task_id)
-        if task is not None and task.status == TaskStatus.RUNNING:
-            self.runtime.task_center.finish(self._task_id, TaskStatus.STOPPED)

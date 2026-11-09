@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
-import cv2
 import numpy as np
+from img_tools.ui.qt_image import bgr_to_qimage
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -38,10 +38,8 @@ class AnnotationCanvas(QWidget):
 
     def set_image(self, image_bgr: np.ndarray, *, image_path: str = "") -> None:
         self.image_bgr = image_bgr
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        height, width = image_rgb.shape[:2]
-        bytes_per_line = width * 3
-        self.image_qimage = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
+        self.image_qimage = bgr_to_qimage(image_bgr)
+        height, width = image_bgr.shape[:2]
         if image_path:
             self.document.image_path = image_path
         self.document.image_size = ImageSize(width=width, height=height)

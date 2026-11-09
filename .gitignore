@@ -13,3 +13,8 @@ checkpoints/
 *.ckpt
 *.onnx
 *.onnx.data
+
+# Per-machine CAB-F flow paths written by the app
+apps/cabf_flow/config/default_paths.json
+apps/cabf_flow/logs/
+*.bak

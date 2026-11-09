@@ -5,22 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cosmos-personal-toolbox"
 version = "0.1.0"
-description = "Personal Cosmos image, labeling, and model training toolbox"
+description = "Personal Cosmos image, labeling, and data toolbox"
 requires-python = ">=3.12"
+dependencies = ["numpy", "Pillow", "opencv-python", "PySide6", "openpyxl", "pyyaml"]
 
 [project.scripts]
 cosmos-toolbox = "cosmos_toolbox.__main__:main"
 
 [tool.setuptools.packages.find]
-where = [".", "modules"]
-include = ["cosmos_toolbox*", "img_tools*", "apps*", "trainer_gui*", "segmentation*", "sew_point*", "sew_point_conntect*", "yolo*"]
+where = ["."]
+include = ["cosmos_toolbox*", "img_tools*", "apps*", "shared*"]
 
 [tool.setuptools.package-dir]
 cabf = "shared/cabf_common/cabf"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "modules", "shared/cabf_common", "../.."]
+pythonpath = [".", "shared/cabf_common", "../.."]
 
 [tool.ruff]
 target-version = "py312"

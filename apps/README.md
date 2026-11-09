@@ -11,7 +11,6 @@
 
 设计约束：
 
-- `modules/` 不依赖 `labeling_ui`
 - `shared/cabf_common` 是 CABF 协议真源
 - `labeling_ui` 与 `data_tools` 可以依赖 `shared/cabf_common` 和 `cabf_flow`
 - `labeling_ui` 与 `data_tools` 已整理为 monorepo 包导入；仅保留 `shared/cabf_common` 的路径注入以便直接脚本启动

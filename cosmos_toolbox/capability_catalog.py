@@ -8,27 +8,27 @@ or probing those adapters.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Iterable
 
 
 class ActivityStage(StrEnum):
     PROJECT = "project"
-    DATA = "data"
+    CABF = "cabf"
     ANNOTATION = "annotation"
-    TRAINING = "training"
-    EVALUATION = "evaluation"
+    FIELD = "field"
+    DATA = "data"
     ARTIFACTS = "artifacts"
     CUSTOM = "custom"
 
 
 STAGE_TITLES: dict[ActivityStage, str] = {
     ActivityStage.PROJECT: "项目",
-    ActivityStage.DATA: "数据准备",
+    ActivityStage.CABF: "CAB-F",
     ActivityStage.ANNOTATION: "标注与复核",
-    ActivityStage.TRAINING: "训练与推理",
-    ActivityStage.EVALUATION: "评估",
+    ActivityStage.FIELD: "现场数据",
+    ActivityStage.DATA: "图片处理",
     ActivityStage.ARTIFACTS: "产物",
     ActivityStage.CUSTOM: "定制功能",
 }
@@ -105,7 +105,6 @@ class CapabilityProjection:
 
 class ActivationKind(StrEnum):
     CALL_WORKSPACE_METHOD = "call_workspace_method"
-    OPEN_TRAINING_FEATURE = "open_training_feature"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,41 +147,19 @@ class WorkspaceCapabilityFact:
     description: str
 
 
-@dataclass(frozen=True, slots=True)
-class TrainingFeatureFact:
-    feature_name: str
-    display_name: str
-    description: str = ""
-    enabled: bool = True
-    action_names: tuple[str, ...] = ()
-
-
-def select_default_training_action(action_names: Iterable[str]) -> str:
-    """Preserve scanner order while providing a deterministic empty fallback."""
-
-    return next((name for name in action_names if name.strip()), "train")
-
-
 def plan_default_capabilities(
     workspaces: Iterable[WorkspaceCapabilityFact],
     *,
     include_project_capabilities: bool,
-    training_features: Iterable[TrainingFeatureFact] = (),
 ) -> tuple[PlannedCapability, ...]:
-    """Project the default capability catalog from explicit external facts.
-
-    A discovered training feature replaces the broad training workspace in
-    navigation.  If discovery fails or yields no enabled feature, the native
-    training workspace remains visible as a safe fallback.
-    """
+    """Project the default capability catalog from explicit workspace facts."""
 
     workspace_facts = tuple(workspaces)
-    enabled_training = tuple(feature for feature in training_features if feature.enabled)
     planned: list[PlannedCapability] = [
         _page(
             "overview",
             "项目概览",
-            "查看项目就绪状态和从数据到模型的工作路径。",
+            "查看项目就绪状态和常用工作路径。",
             ActivityStage.PROJECT,
             page_factory_key="overview",
             order=0,
@@ -191,14 +168,8 @@ def plan_default_capabilities(
 
     stage_by_workspace = {
         "image": ActivityStage.DATA,
-        "labeling": ActivityStage.ANNOTATION,
-        "training": ActivityStage.TRAINING,
     }
     for workspace in workspace_facts:
-        replaced = include_project_capabilities and (
-            workspace.key == "labeling"
-            or (workspace.key == "training" and bool(enabled_training))
-        )
         planned.append(
             _workspace(
                 workspace.key,
@@ -207,7 +178,6 @@ def plan_default_capabilities(
                 stage_by_workspace.get(workspace.key, ActivityStage.CUSTOM),
                 workspace_key=workspace.key,
                 order=900,
-                visible=not replaced,
             )
         )
 
@@ -245,8 +215,8 @@ def plan_default_capabilities(
         ),
         (
             "data.roi_editor",
-            "ROI 编辑",
-            "在图片上配置和复用 ROI。",
+            "YAML ROI 编辑（通用）",
+            "在样本图上编辑其他项目 YAML 的 ROI；CAB-F 配置会自动转到“CAB-F ROI 配置”。",
             ActivityStage.DATA,
             "labeling_tool:roi",
         ),
@@ -256,13 +226,6 @@ def plan_default_capabilities(
             "生成和检查内侧区域 Mask。",
             ActivityStage.DATA,
             "labeling_tool:inner_mask",
-        ),
-        (
-            "data.image_filter",
-            "图像筛选",
-            "按图像条件批量筛选素材。",
-            ActivityStage.DATA,
-            "labeling_tool:image_filter",
         ),
         (
             "annotation.visualize",
@@ -306,40 +269,22 @@ def plan_default_capabilities(
                 keywords=("PNG", "JPG", "JPEG", "压缩", "存储", "无损", "有损", "原地"),
             ),
             _page(
-                "cabf.field_dataset",
-                "CAB-F 现场数据集生成",
-                "独立勾选模型，从现场原图生成裁片、伪标签和复核数据，支持暂停续跑。",
+                "data.ng_extract",
+                "NG 原图提取",
+                "从数据库或导出的 Excel 筛选 NG 产品记录，检查后复制原图；也可把数据库导出为 Excel。",
                 ActivityStage.DATA,
-                page_factory_key="cabf_field_dataset",
-                order=1,
-                keywords=("CAB-F", "数据集", "现场", "批量", "ONNX", "裁片"),
-            ),
-            _page(
-                "cabf.db_ng_export",
-                "数据库 NG 图片提取",
-                "只读筛选数据库 NG 产品记录，预览并复制关联原图或结果图，支持暂停续跑。",
-                ActivityStage.DATA,
-                page_factory_key="db_ng_export",
+                page_factory_key="ng_extract",
                 order=2,
-                keywords=("数据库", "NG", "原图", "复制", "日志"),
+                keywords=("数据库", "SQLite", "Excel", "xlsx", "NG", "原图", "复制", "导出", "日志"),
             ),
             _page(
                 "cabf.config_studio",
-                "CAB-F 基准图与模板生成",
-                "从 TOP/BOTTOM 初始原图生成全尺寸校准基准图与匹配模板，并在校准坐标系中编辑 ROI。",
+                "CAB-F ROI 配置",
+                "加载产品 YAML 与 TOP/BOTTOM 校准基准图，在校准坐标系中查看和编辑 ROI。",
                 ActivityStage.DATA,
                 page_factory_key="cabf_config",
                 order=0,
-                keywords=("CAB-F", "ROI", "模板", "配置", "基准图"),
-            ),
-            _page(
-                "cosmos.pipeline_test",
-                "完整流程测试",
-                "跳过生产页面，按配置运行项目检测、规则判定、产品汇总和结果输出。",
-                ActivityStage.EVALUATION,
-                page_factory_key="cosmos_pipeline",
-                order=10,
-                keywords=("Cosmos", "CAB-F", "Pipeline", "完整流程", "测试", "配置"),
+                keywords=("CAB-F", "ROI", "YAML", "配置", "基准图"),
             ),
             _page(
                 "data.database",
@@ -351,35 +296,13 @@ def plan_default_capabilities(
                 keywords=("数据库", "SQLite", "只读", "检测记录"),
             ),
             _page(
-                "data.transfer",
-                "数据库导出与 Excel NG 提取",
-                "只读导出 SQLite 为 Excel，再按日期与 NG 面筛选、检查和复制原图。",
-                ActivityStage.DATA,
-                page_factory_key="data_transfer",
-                order=41,
-                keywords=("数据库", "SQLite", "Excel", "xlsx", "NG", "原图", "复制", "导出"),
-            ),
-            _page(
-                "cabf.sew_point_connect",
-                "Sew Point Connect",
-                "连接数据准备、CAB-F 点边复核、模型训练和产物。",
-                ActivityStage.PROJECT,
-                page_factory_key="sew_point_connect",
-                order=20,
-                keywords=("CAB-F", "连边", "点边", "流程"),
-            ),
-            _workspace(
                 "cabf.workflow",
                 "CAB-F 数据与标注流程",
-                "筛选、预测、点边修正、校验和训练数据导出。",
+                "数据集准备、筛选、点边标注、校验与数据集导出。",
                 ActivityStage.ANNOTATION,
-                workspace_key="labeling",
+                page_factory_key="cabf_workflow",
                 order=10,
-                activation=ActivationPlan(
-                    ActivationKind.CALL_WORKSPACE_METHOD,
-                    "_show_cabf_workflow_dialog",
-                ),
-                keywords=("CAB-F", "9步流程", "标注"),
+                keywords=("CAB-F", "流程", "标注", "校验", "导出"),
             ),
             _page(
                 "cabf.graph_editor",
@@ -398,55 +321,15 @@ def plan_default_capabilities(
                 order=30,
                 keywords=("图片", "筛选", "复核", "标注", "数据清理"),
             ),
-            _workspace(
-                "cabf.point_filter",
-                "数据筛选（兼容入口）",
-                "旧 CAB-F 数据筛选入口。",
-                ActivityStage.ANNOTATION,
-                workspace_key="labeling",
-                order=30,
-                activation=ActivationPlan(
-                    ActivationKind.CALL_WORKSPACE_METHOD,
-                    "_show_point_filter_dialog",
-                ),
-                visible=False,
-            ),
-            _page(
-                "cabf.dataset_export",
-                "数据集校验与导出",
-                "校验母数据并导出训练数据集。",
-                ActivityStage.ANNOTATION,
-                page_factory_key="cabf_dataset_export",
-                order=40,
-            ),
         )
     )
-
-    for order, feature in enumerate(enabled_training, start=10):
-        action = select_default_training_action(feature.action_names)
-        planned.append(
-            _workspace(
-                f"training.{feature.feature_name}",
-                feature.display_name,
-                feature.description or f"配置并运行 {feature.display_name}。",
-                ActivityStage.TRAINING,
-                workspace_key="training",
-                order=order,
-                activation=ActivationPlan(
-                    ActivationKind.OPEN_TRAINING_FEATURE,
-                    feature.feature_name,
-                    action,
-                ),
-                keywords=(feature.feature_name, "训练", "推理", "导出"),
-            )
-        )
 
     planned.extend(
         (
             _page(
                 "project.artifacts",
                 "项目产物",
-                "查看训练、推理和导出产生的模型与文件。",
+                "查看处理与导出任务产生的文件。",
                 ActivityStage.ARTIFACTS,
                 page_factory_key="artifacts",
                 order=10,
@@ -454,14 +337,47 @@ def plan_default_capabilities(
             _page(
                 "project.tasks",
                 "任务与日志",
-                "集中查看训练和处理任务的状态、进度与日志。",
+                "集中查看处理任务的状态、进度与日志。",
                 ActivityStage.ARTIFACTS,
                 page_factory_key="tasks",
                 order=20,
             ),
         )
     )
-    return _validated(planned)
+    return _validated(_place(planned))
+
+
+# One table decides which navigation group each capability lives in and its
+# position there, so related entries stay together as the catalog grows.
+_NAV_PLACEMENT: dict[str, tuple[ActivityStage, int]] = {
+    "cabf.workflow": (ActivityStage.CABF, 1),
+    "cabf.graph_editor": (ActivityStage.CABF, 2),
+    "cabf.config_studio": (ActivityStage.CABF, 3),
+    "data.sample_review": (ActivityStage.ANNOTATION, 1),
+    "annotation.visualize": (ActivityStage.ANNOTATION, 2),
+    "annotation.point_mark": (ActivityStage.ANNOTATION, 3),
+    "data.ng_extract": (ActivityStage.FIELD, 1),
+    "data.database": (ActivityStage.FIELD, 2),
+    "image": (ActivityStage.DATA, 1),
+    "images.png_compress": (ActivityStage.DATA, 2),
+    "data.batch_crop": (ActivityStage.DATA, 3),
+    "data.single_crop": (ActivityStage.DATA, 4),
+    "data.tile_crop": (ActivityStage.DATA, 5),
+    "data.keyword_split": (ActivityStage.DATA, 6),
+    "data.inner_mask": (ActivityStage.DATA, 7),
+    "data.roi_editor": (ActivityStage.DATA, 8),
+}
+
+
+def _place(planned: Iterable[PlannedCapability]) -> list[PlannedCapability]:
+    placed = []
+    for item in planned:
+        placement = _NAV_PLACEMENT.get(item.spec.key)
+        if placement is not None:
+            stage, order = placement
+            item = replace(item, spec=replace(item.spec, stage=stage, order=order))
+        placed.append(item)
+    return placed
 
 
 def _page(

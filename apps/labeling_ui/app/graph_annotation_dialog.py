@@ -43,6 +43,10 @@ from .annotation.commands import (
     next_point_id,
 )
 from .annotation.document import AnnotationDocument
+from img_tools.ui.qt_image import bgr_to_qimage
+from img_tools.core.image_cache import ImagePrefetcher, neighbours
+from img_tools.ui.qt_image import bind_cache_to_widget
+from img_tools.core.image_io import read_image
 from cabf import (
     IMAGE_SUFFIXES,
     make_empty_master_annotation,
@@ -239,7 +243,6 @@ class EdgeAnnotationCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.image_bgr: Optional[np.ndarray] = None
-        self.image_rgb: Optional[np.ndarray] = None
         self.image_qimage: Optional[QImage] = None
         self.image_path: str = ""
         self.points: list[dict] = []
@@ -258,10 +261,7 @@ class EdgeAnnotationCanvas(QWidget):
 
     def set_image(self, image_bgr: np.ndarray, image_path: str = ""):
         self.image_bgr = image_bgr
-        self.image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        height, width = self.image_rgb.shape[:2]
-        bytes_per_line = width * 3
-        self.image_qimage = QImage(self.image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
+        self.image_qimage = bgr_to_qimage(image_bgr)
         self.image_path = image_path
         self.points = []
         self.edges = []
@@ -473,11 +473,13 @@ class EdgeAnnotationCanvas(QWidget):
         if not self._overlay_visible:
             return
 
+        # One O(points) index per paint instead of a linear search per edge end.
+        points_by_id = {int(point["id"]): point for point in self.points}
         if self.is_layer_visible("edges"):
             painter.setPen(QPen(EDGE_COLOR, 2))
             for edge in self.edges:
-                pa = self._find_point(int(edge["src"]))
-                pb = self._find_point(int(edge["dst"]))
+                pa = points_by_id.get(int(edge["src"]))
+                pb = points_by_id.get(int(edge["dst"]))
                 if pa is None or pb is None:
                     continue
                 ax, ay = self._image_to_canvas(pa["x"], pa["y"])
@@ -485,7 +487,7 @@ class EdgeAnnotationCanvas(QWidget):
                 painter.drawLine(ax, ay, bx, by)
 
         if self.is_layer_visible("points") and self.pending_start_id is not None:
-            point = self._find_point(int(self.pending_start_id))
+            point = points_by_id.get(int(self.pending_start_id))
             if point is not None:
                 px, py = self._image_to_canvas(point["x"], point["y"])
                 painter.setPen(QPen(PENDING_POINT_COLOR, 2, Qt.DashLine))
@@ -651,6 +653,7 @@ class StitchGraphEditorDialog(QDialog):
         self.current_document: Optional[AnnotationDocument] = None
         self.current_output_path: Optional[Path] = None
         self._has_unsaved_changes = False
+        self._images = bind_cache_to_widget(self, ImagePrefetcher(lambda path: read_image(path, cv2.IMREAD_COLOR)))
 
         self._build_ui()
         self._connect_signals()
@@ -960,7 +963,7 @@ class StitchGraphEditorDialog(QDialog):
             return None
         return Path(out_dir_text) / f"{item.stem}.json"
 
-    def _load_annotation_for_item(self, item: FolderItem) -> dict:
+    def _load_annotation_for_item(self, item: FolderItem, image_size: tuple[int, int] | None = None) -> dict:
         output_path = self._build_output_path(item)
         if output_path is not None and output_path.exists():
             data = load_json(output_path)
@@ -986,8 +989,10 @@ class StitchGraphEditorDialog(QDialog):
                 return annotation
             return convert_labelme_json_to_base(item.source_json_path, item.image_path)
 
-        image = read_image_bgr(item.image_path)
-        return make_empty_master_annotation(str(item.image_path), image.shape[1], image.shape[0], item.stem)
+        if image_size is None:
+            image = read_image_bgr(item.image_path)
+            image_size = (image.shape[1], image.shape[0])
+        return make_empty_master_annotation(str(item.image_path), image_size[0], image_size[1], item.stem)
 
     def jump_to_index(self, index: int):
         if not self.folder_items:
@@ -1008,19 +1013,23 @@ class StitchGraphEditorDialog(QDialog):
             done = Signal(object, object)
             error = Signal(str)
 
-            def __init__(self, it):
+            def __init__(self, it, images):
                 super().__init__()
                 self._item = it
+                self._images = images
 
             def run(self):
                 try:
-                    image = read_image_bgr(self._item.image_path)
-                    annotation = self._load_annotation_for_item(self._item)
+                    image = self._images.get(self._item.image_path)
+                    if image is None:
+                        raise FileNotFoundError(f"无法读取图片: {self._item.image_path}")
+                    # Reuse the decoded size; images without a label used to be decoded twice.
+                    annotation = self._load_annotation_for_item(self._item, (image.shape[1], image.shape[0]))
                     self.done.emit(image, annotation)
                 except Exception as exc:
                     self.error.emit(str(exc))
 
-        w = _LoadWorker(item)
+        w = _LoadWorker(item, self._images)
         w._load_annotation_for_item = self._load_annotation_for_item
         w.done.connect(lambda img, ann: self._on_jump_done(img, ann, item, index))
         w.error.connect(lambda msg: (self.setEnabled(True), QMessageBox.critical(self, "加载失败", msg), self.status_label.setText("加载失败")))
@@ -1035,6 +1044,7 @@ class StitchGraphEditorDialog(QDialog):
         self.current_output_path = self._build_output_path(item)
         self._has_unsaved_changes = False
         self.canvas.set_image(image, image_path=str(item.image_path))
+        self._images.prefetch(neighbours([entry.image_path for entry in self.folder_items], index))
         self.canvas.set_points(points)
         self.canvas.set_edges(edges)
         self.lbl_current_name.setText(item.image_path.name)

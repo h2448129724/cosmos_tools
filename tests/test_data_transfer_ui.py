@@ -116,11 +116,14 @@ def wait_page(app, page):
 
 def test_registered_page_real_threads_and_path_handoff(app, database, tmp_path):
     plan = plan_default_capabilities((), include_project_capabilities=True)
-    capability = next(item for item in plan if item.spec.key == 'data.transfer')
+    capability = next(item for item in plan if item.spec.key == 'data.ng_extract')
     window = QWidget()
     center = TaskCenter()
-    page = _page_factory_for(capability.page_factory_key)(SimpleNamespace(window=window, task_center=center), window)
+    host = _page_factory_for(capability.page_factory_key)(
+        SimpleNamespace(window=window, task_center=center, project_session=None), window)
+    page = host.excel_source
     assert isinstance(page, DataTransferPage)
+    assert page.task_center is center
     page.database.setText(str(database))
     page.excel_output.setText(str(tmp_path / 'cosmos.xlsx'))
     page.export_button.click()

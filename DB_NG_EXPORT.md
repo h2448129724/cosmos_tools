@@ -1,9 +1,9 @@
-# 数据库 NG 图片提取
+# NG 原图提取 · 数据库来源
 
-入口：工具箱的数据工具「数据库 NG 图片提取」，或：
+入口：工具箱「现场数据 → NG 原图提取」的“来源：数据库”标签页，或：
 
 ```powershell
-conda run --no-capture-output -n onnx-gpu python -m cosmos_toolbox.db_ng_ui
+python -m cosmos_toolbox.db_ng_ui
 ```
 
 1. 选择 SQLite 数据库，默认项目根目录的 cosmos.db。只读打开，不通过生产数据库会话，不建表、不修改 WAL 设置。

@@ -2,9 +2,9 @@
 """只读导出 SQLite 数据库，每张表对应一个 Excel 工作表。
 
 用法（在项目根目录执行）：
-    conda run --no-capture-output -n onnx-gpu python scripts/export_db_to_excel.py
-    conda run --no-capture-output -n onnx-gpu python scripts/export_db_to_excel.py --output local/cosmos.xlsx
-    conda run --no-capture-output -n onnx-gpu python scripts/export_db_to_excel.py --tables inspection_result ng_error
+    python scripts/export_db_to_excel.py
+    python scripts/export_db_to_excel.py --output local/cosmos.xlsx
+    python scripts/export_db_to_excel.py --tables inspection_result ng_error
 
 依赖：openpyxl。默认数据库为项目根目录 cosmos.db，输出为数据库旁的同名 .xlsx。
 保持原始字段及关联 ID；JSON、日期和图片路径保持文本，不嵌入图片。
