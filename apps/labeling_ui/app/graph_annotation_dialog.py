@@ -11,6 +11,7 @@ import numpy as np
 from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QCheckBox,
     QFileDialog,
@@ -43,6 +44,7 @@ from .annotation.commands import (
     next_point_id,
 )
 from .annotation.document import AnnotationDocument
+from cosmos_toolbox.ui.shortcuts import bind_page_shortcuts
 from img_tools.ui.qt_image import bgr_to_qimage
 from img_tools.core.image_cache import ImagePrefetcher, neighbours
 from img_tools.ui.qt_image import bind_cache_to_widget
@@ -660,7 +662,7 @@ class StitchGraphEditorDialog(QDialog):
 
     def _build_ui(self):
         self.editor_shell = AnnotationEditorShell(
-            "点边一体标注器",
+            "点边标注",
             "直接修点和修边，默认按当前文件夹顺序处理。",
             parent=self,
         )
@@ -802,6 +804,7 @@ class StitchGraphEditorDialog(QDialog):
         self.save_state = AutoSaveStatusController(self.save_status_label, self.btn_save)
 
     def _connect_signals(self):
+        self._bind_shortcuts()
         self.btn_choose_src.clicked.connect(self.choose_src_dir)
         self.btn_choose_label.clicked.connect(self.choose_label_dir)
         self.btn_choose_out.clicked.connect(self.choose_out_dir)
@@ -1007,7 +1010,7 @@ class StitchGraphEditorDialog(QDialog):
         self.file_list.blockSignals(False)
         item = self.folder_items[index]
         self.status_label.setText("加载中...")
-        self.setEnabled(False)
+        self._set_loading(True)
 
         class _LoadWorker(QThread):
             done = Signal(object, object)
@@ -1032,12 +1035,12 @@ class StitchGraphEditorDialog(QDialog):
         w = _LoadWorker(item, self._images)
         w._load_annotation_for_item = self._load_annotation_for_item
         w.done.connect(lambda img, ann: self._on_jump_done(img, ann, item, index))
-        w.error.connect(lambda msg: (self.setEnabled(True), QMessageBox.critical(self, "加载失败", msg), self.status_label.setText("加载失败")))
+        w.error.connect(lambda msg: (self._set_loading(False), QMessageBox.critical(self, "加载失败", msg), self.status_label.setText("加载失败")))
         w.start()
         self._load_worker = w
 
     def _on_jump_done(self, image, annotation, item, index):
-        self.setEnabled(True)
+        self._set_loading(False)
         self.current_annotation = annotation
         self.current_document = build_editor_document_from_payload(annotation, image_path=item.image_path)
         points, edges = extract_editor_state_from_document(self.current_document)
@@ -1123,34 +1126,35 @@ class StitchGraphEditorDialog(QDialog):
         if self.check_overwrite_source.isChecked() or self.edit_output_dir.text().strip():
             self.save_current_annotation(silent=True)
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_A:
-            self.jump_to_index(self.current_index - 1)
-            event.accept()
+    def _zoom_by(self, delta: float) -> None:
+        self.canvas.change_zoom(delta)
+        self.status_label.setText(f"当前缩放: {self.canvas.scale:.2f}x")
+
+    def _bind_shortcuts(self) -> None:
+        bind_page_shortcuts(self, {
+            Qt.Key_A: lambda: self.jump_to_index(self.current_index - 1),
+            Qt.Key_D: lambda: self.jump_to_index(self.current_index + 1),
+            Qt.Key_S: lambda: self.save_current_annotation(silent=False),
+            Qt.Key_H: self.btn_toggle_overlay.toggle,
+            Qt.Key_Plus: lambda: self._zoom_by(+0.5),
+            Qt.Key_Equal: lambda: self._zoom_by(+0.5),
+            Qt.Key_Minus: lambda: self._zoom_by(-0.5),
+        })
+
+    def _set_loading(self, loading: bool) -> None:
+        """Disable input while an image loads, then hand focus back.
+
+        Disabling the editor drops keyboard focus; without restoring it the
+        next A/D would land on the main window and do nothing.
+        """
+        if loading:
+            focused = QApplication.focusWidget()
+            self._focus_before_load = focused if focused is not None and self.isAncestorOf(focused) else None
+            self.setEnabled(False)
             return
-        if event.key() == Qt.Key_D:
-            self.jump_to_index(self.current_index + 1)
-            event.accept()
-            return
-        if event.key() == Qt.Key_S:
-            self.save_current_annotation(silent=False)
-            event.accept()
-            return
-        if event.key() == Qt.Key_H:
-            self.btn_toggle_overlay.toggle()
-            event.accept()
-            return
-        if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
-            self.canvas.change_zoom(+0.5)
-            self.status_label.setText(f"当前缩放: {self.canvas.scale:.2f}x")
-            event.accept()
-            return
-        if event.key() in (Qt.Key_Minus, Qt.Key_Underscore):
-            self.canvas.change_zoom(-0.5)
-            self.status_label.setText(f"当前缩放: {self.canvas.scale:.2f}x")
-            event.accept()
-            return
-        super().keyPressEvent(event)
+        self.setEnabled(True)
+        target = getattr(self, "_focus_before_load", None) or self.canvas
+        target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def shutdown(self) -> None:
         worker = getattr(self, "_load_worker", None)

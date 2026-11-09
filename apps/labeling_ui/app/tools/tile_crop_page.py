@@ -26,8 +26,8 @@ from .base import BaseToolPage, make_log_box, make_log_card, set_primary
 
 class AutoTileCropPage(BaseToolPage):
     tool_key = "auto_tile_crop"
-    tool_title = "自动裁剪"
-    tool_nav_title = "自动裁剪"
+    tool_title = "自动分块"
+    tool_nav_title = "自动分块"
     tool_icon = "◈"
     tool_summary = "按固定尺寸自动切块，适合训练样本铺切和大图拆分。"
     tool_tags = ("自动切块", "训练准备", "大图拆分")
@@ -37,7 +37,7 @@ class AutoTileCropPage(BaseToolPage):
         self._build_ui()
 
     def _build_ui(self):
-        scaffold = PageScaffold("自动裁剪", "按固定尺寸自动切割成多个小块。")
+        scaffold = PageScaffold("自动分块", "按固定尺寸自动切割成多个小块。")
         QVBoxLayout(self).addWidget(scaffold)
         lay = scaffold.content_layout
         settings_card = SectionSurface("输入与输出", "选择目录、切块尺寸和边缘处理方式。")

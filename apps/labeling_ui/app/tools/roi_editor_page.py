@@ -136,7 +136,7 @@ def _dump_yaml_file(path: Path, data: Any, roi_fields: list[RoiField], original_
 
 class RoiConfigEditorPage(BaseToolPage):
     tool_key = "roi_config_editor"
-    tool_title = "ROI配置编辑"
+    tool_title = "YAML ROI 编辑（通用）"
     tool_nav_title = "ROI配置"
     tool_icon = "▣"
     tool_summary = "读取 YAML 配置中的 ROI 字段，在样本图上可视化查看、创建和调整区域。"
@@ -165,7 +165,7 @@ class RoiConfigEditorPage(BaseToolPage):
         lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(8)
 
-        lay.addWidget(make_page_header("ROI配置编辑", "读取 YAML 并直接调整图上的 ROI。"))
+        lay.addWidget(make_page_header("YAML ROI 编辑（通用）", "读取 YAML 并直接调整图上的 ROI。"))
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)

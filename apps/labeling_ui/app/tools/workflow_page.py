@@ -714,15 +714,15 @@ class StitchWorkflowPage(BaseToolPage):
 
         card, lay = self._build_step_body_card()
         desc = QLabel(
-            "此步骤用于在缝纫点预测前先筛除不符合要求的裁剪图。\n\n"
-            "默认按无标签模式打开筛选器，直接浏览当前母图目录。"
-            " 建议把不合格样本移到垃圾桶，保留下来的图片会继续进入后续预测流程。"
+            "此步骤用于在标注前先筛除不符合要求的裁剪图。\n\n"
+            "打开样本审阅后逐张浏览待筛选目录：S 保留到筛选保留目录，W 移除，Z 撤销。"
+            " 点“完成审阅”后，保留下来的图片会作为后续标注和导出的母图目录。"
         )
         desc.setWordWrap(True)
         set_ui_role(desc, "muted")
         lay.addWidget(desc)
 
-        note = QLabel("提示：如果只是想剔除不合格图片，优先使用“移到垃圾桶”，这样后续步骤会继续使用当前目录中的剩余样本。")
+        note = QLabel("提示：不需要筛选时可以点“不需要筛选，直接继续”，后续步骤会直接使用待筛选目录。")
         note.setWordWrap(True)
         set_ui_role(note, "muted")
         lay.addWidget(note)

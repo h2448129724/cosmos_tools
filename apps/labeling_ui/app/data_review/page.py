@@ -20,14 +20,12 @@ from img_tools.core.review_session import (
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -55,6 +53,7 @@ from .model import (
 from .preview import ImageOnlyPreviewAdapter, ReviewPreviewAdapter
 from cosmos_toolbox.ui import ActionBar, PageHeader, PathField, SectionSurface, StatusBanner
 from cosmos_toolbox.ui.primitives import FlowLayout
+from cosmos_toolbox.ui.shortcuts import bind_page_shortcuts
 
 
 def read_image_bgr(path: Path) -> np.ndarray:
@@ -102,7 +101,7 @@ class DatasetReviewPage(QWidget):
         parent=None,
         *,
         preview_adapter: ReviewPreviewAdapter | None = None,
-        title: str = "数据审阅",
+        title: str = "样本审阅",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -169,7 +168,7 @@ class DatasetReviewPage(QWidget):
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(8)
 
-        root.addWidget(PageHeader("数据审阅", "浏览图片样本，逐张决定保留或移除。"))
+        root.addWidget(PageHeader(self.windowTitle(), "浏览图片样本，逐张决定保留或移除。"))
 
         source_bar = SectionSurface()
         source_bar.setAccessibleName("当前数据源")
@@ -179,7 +178,12 @@ class DatasetReviewPage(QWidget):
         self.source_summary = QLabel("尚未选择图片目录")
         self.source_summary.setAccessibleName("当前数据源")
         self.source_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        source_layout.addWidget(self.source_summary, 1)
+        # Wrap long paths instead of widening the page; buttons share the row
+        # so the source bar stays short on 640 px tall windows.
+        self.source_summary.setWordWrap(True)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_row.addWidget(self.source_summary, 1)
         self.btn_toggle_source = QPushButton("设置")
         self.btn_toggle_source.setMaximumWidth(72)
         self.btn_toggle_source.setAccessibleName("展开数据源设置")
@@ -188,8 +192,9 @@ class DatasetReviewPage(QWidget):
         self.btn_load.setAccessibleName("加载或刷新样本")
         self.btn_load.setToolTip("按当前数据源加载样本")
         set_primary(self.btn_load)
-        source_layout.addWidget(self.btn_toggle_source)
-        source_layout.addWidget(self.btn_load)
+        source_row.addWidget(self.btn_toggle_source)
+        source_row.addWidget(self.btn_load)
+        source_layout.addLayout(source_row)
         root.addWidget(source_bar)
 
         self.source_panel = SectionSurface()
@@ -333,6 +338,13 @@ class DatasetReviewPage(QWidget):
         self.btn_accept.clicked.connect(self.move_current_to_save)
         self.btn_remove.clicked.connect(self.move_current_to_trash)
         self.btn_undo.clicked.connect(self.undo_last_decision)
+        bind_page_shortcuts(self, {
+            Qt.Key_A: lambda: self.jump_to_index(self.current_index - 1),
+            Qt.Key_D: lambda: self.jump_to_index(self.current_index + 1),
+            Qt.Key_S: self.move_current_to_save,
+            Qt.Key_W: self.move_current_to_trash,
+            Qt.Key_Z: self.undo_last_decision,
+        })
         self.btn_complete.clicked.connect(self.complete_review)
         self._sync_mode_ui()
 
@@ -599,24 +611,6 @@ class DatasetReviewPage(QWidget):
         """Compatibility shim; new callers subscribe to reviewCompleted."""
         self.complete_review()
 
-    def keyPressEvent(self, event) -> None:
-        if isinstance(QApplication.focusWidget(), QLineEdit):
-            super().keyPressEvent(event)
-            return
-        handlers = {
-            Qt.Key_A: lambda: self.jump_to_index(self.current_index - 1),
-            Qt.Key_D: lambda: self.jump_to_index(self.current_index + 1),
-            Qt.Key_S: self.move_current_to_save,
-            Qt.Key_W: self.move_current_to_trash,
-            Qt.Key_Z: self.undo_last_decision,
-        }
-        handler = handlers.get(event.key())
-        if handler is not None:
-            handler()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
 
 class DatasetReviewDialog(QDialog):
     """Standalone compatibility shell around :class:`DatasetReviewPage`."""
@@ -628,7 +622,7 @@ class DatasetReviewDialog(QDialog):
         parent=None,
         *,
         preview_adapter: ReviewPreviewAdapter | None = None,
-        title: str = "数据审阅",
+        title: str = "样本审阅",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)

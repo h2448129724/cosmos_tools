@@ -6,6 +6,9 @@ import os
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
+    QScrollArea,
+    QWidget,
     QFileDialog,
     QLabel,
     QLineEdit,
@@ -22,6 +25,7 @@ from PySide6.QtCore import Qt
 from apps.data_tools.processing.image_io import read_image
 from apps.data_tools.processing.batch_crop import batch_crop, crop_single_image
 from ..preview_widget import ZoomableLabel
+from cosmos_toolbox.ui.shortcuts import bind_page_shortcuts
 from cosmos_toolbox.ui.primitives import ActionBar, PathField, SectionSurface, set_ui_role
 from .base import BaseToolPage, make_log_box, make_log_card, make_page_header, set_primary
 
@@ -48,6 +52,19 @@ class BatchCropPage(BaseToolPage):
         lay.setSpacing(10)
 
         lay.addWidget(make_page_header("批量裁剪", "框选 ROI 后验证单张，再执行整批输出。"))
+        page_layout = lay
+        # The page needs ~1000 px of height; scroll instead of squeezing the
+        # preview and task panels into unreadable slivers on smaller windows.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll, 1)
 
         settings_card = SectionSurface("输入与输出", "选择图片目录和输出位置，然后加载图片。")
         settings_lay = settings_card.body_layout
@@ -96,6 +113,7 @@ class BatchCropPage(BaseToolPage):
 
         self._preview = ZoomableLabel()
         self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._preview.setMinimumHeight(360)
         self._preview.setAccessibleName("图片预览与 ROI 画布")
         self._preview.rectSelected.connect(self._on_rect_selected)
         self._preview.rectsChanged.connect(self._refresh_roi_list)
@@ -223,6 +241,7 @@ class BatchCropPage(BaseToolPage):
         self._log = make_log_box("运行日志...")
         lay.addWidget(make_log_card(self._log))
         self._update_task_panel()
+        bind_page_shortcuts(self, {Qt.Key_A: lambda: self._show_offset(-1), Qt.Key_D: lambda: self._show_offset(+1)})
 
     def _pick_dir(self, entry: QLineEdit):
         d = QFileDialog.getExistingDirectory(self._mw, "选择目录", entry.text() or ".")
@@ -449,14 +468,3 @@ class BatchCropPage(BaseToolPage):
             else:
                 state_text = "状态：已框选"
         self._task_state.setText(state_text)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_A:
-            self._show_offset(-1)
-            event.accept()
-            return
-        if event.key() == Qt.Key_D:
-            self._show_offset(+1)
-            event.accept()
-            return
-        super().keyPressEvent(event)

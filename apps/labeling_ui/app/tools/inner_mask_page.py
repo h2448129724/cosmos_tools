@@ -28,7 +28,7 @@ def _write_image(path: Path, image: np.ndarray) -> None:
 
 class InnerMaskPage(BaseToolPage):
     tool_key = "inner_mask"
-    tool_title = "内侧 Mask 制作"
+    tool_title = "内侧 Mask"
     tool_nav_title = "内侧Mask"
     tool_icon = "◒"
     tool_summary = "在图片上绘制内侧区域，导出同尺寸单通道 mask。"
@@ -41,7 +41,7 @@ class InnerMaskPage(BaseToolPage):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        scaffold = PageScaffold("内侧 Mask 制作", "绘制内侧多边形并保存为白色内侧、黑色背景的 mask。")
+        scaffold = PageScaffold("内侧 Mask", "绘制内侧多边形并保存为白色内侧、黑色背景的 mask。")
         QVBoxLayout(self).addWidget(scaffold)
         root = scaffold.content_layout
 

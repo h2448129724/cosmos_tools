@@ -52,8 +52,8 @@ def collect_visualization_items(image_dir: Path, label_dir: Path | None = None) 
 
 class LabelVisualizationPage(BaseToolPage):
     tool_key = "label_visualization"
-    tool_title = "标签可视化"
-    tool_nav_title = "标签可视化"
+    tool_title = "标注可视化"
+    tool_nav_title = "标注可视化"
     tool_icon = "V"
     tool_summary = "加载图片与同名标注文件，按点、线、ROI、多边形图层查看标签。"
     tool_tags = ("标签", "可视化", "图层")
@@ -72,7 +72,7 @@ class LabelVisualizationPage(BaseToolPage):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        root.addWidget(PageHeader("标签可视化", "选择图片目录和标签目录，按图层查看点、线、ROI 和多边形。", "通用工具"))
+        root.addWidget(PageHeader("标注可视化", "选择图片目录和标签目录，按图层查看点、线、ROI 和多边形。", "通用工具"))
 
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter, 1)

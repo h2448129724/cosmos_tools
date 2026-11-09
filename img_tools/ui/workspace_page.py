@@ -51,6 +51,7 @@ class ImageWorkspacePage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("imageWorkspacePage")
+        self.setProperty("ownsPageHeader", True)
         self._files: list[Path] = []
         self._images = bind_cache_to_widget(self, ImagePrefetcher())
         self._current_path: Path | None = None

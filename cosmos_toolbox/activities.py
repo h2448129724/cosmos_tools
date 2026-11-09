@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -25,7 +26,17 @@ class ProjectOverviewPage(QWidget):
     def __init__(self, runtime: CapabilityRuntime, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.runtime = runtime
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        # Scroll on short windows instead of squeezing the cards' buttons.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 

@@ -29,7 +29,7 @@ class AnnotationCanvas(QWidget):
         self._pan_anchor: QPoint | None = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setMinimumSize(560, 420)
+        self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def set_document(self, document: AnnotationDocument) -> None:

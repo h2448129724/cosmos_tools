@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .capabilities import CapabilityCatalog, STAGE_TITLES
+from .capability_catalog import short_title
 from .project_context import ProjectState
 from .project_session import ProjectArtifact
 from .layout_presentation import LayoutPresentation
@@ -62,6 +63,7 @@ class NavigationRail(QFrame):
         self.content_layout.setSpacing(3)
         scroll.setWidget(content)
         outer.addWidget(scroll, 1)
+        self._scroll = scroll
 
         for stage, capabilities in catalog.grouped():
             heading = QLabel(STAGE_TITLES[stage])
@@ -83,12 +85,15 @@ class NavigationRail(QFrame):
             return
         self._compact = compact
         if compact:
-            self.setMinimumWidth(64)
-            self.setMaximumWidth(64)
+            self.setMinimumWidth(88)
+            self.setMaximumWidth(88)
+            # The scrollbar would cover the short labels; the wheel still scrolls.
+            self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.brand.setText("C")
             self.brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.subtitle.hide()
         else:
+            self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setMinimumWidth(188)
             self.setMaximumWidth(228)
             self.brand.setText("COSMOS")
@@ -98,9 +103,12 @@ class NavigationRail(QFrame):
             heading.setVisible(not compact)
         for button in self._buttons:
             title = str(button.property("fullTitle") or button.text())
-            button.setText(title[:2] if compact else title)
+            button.setText(str(button.property("shortTitle") or title) if compact else title)
             button.setToolTip(title)
             button.setAccessibleName(title)
+            button.setProperty("compact", compact)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def _add_capability(self, key: str, title: str) -> None:
         index = len(self._keys)
@@ -109,6 +117,7 @@ class NavigationRail(QFrame):
         button.setCheckable(True)
         button.setProperty("navItem", True)
         button.setProperty("fullTitle", title)
+        button.setProperty("shortTitle", short_title(key, title))
         button.setAccessibleName(title)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.clicked.connect(lambda checked=False, row=index: self.setCurrentIndex(row))

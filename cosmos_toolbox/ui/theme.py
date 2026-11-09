@@ -292,6 +292,7 @@ QLabel#navigationSection {{ color: #767d84; font-size: 10px; font-weight: 700; p
 QPushButton#navigationItem {{ text-align: left; color: #30363b; background: transparent; border: none; border-left: 3px solid transparent; border-radius: 0; min-height: 30px; padding: 3px 9px; font-weight: 500; }}
 QPushButton#navigationItem:hover {{ background: #e2e5e7; color: {tokens.text}; }}
 QPushButton#navigationItem:checked {{ background: {tokens.primary_selected}; color: #183f66; border-left: 3px solid #356a9a; font-weight: 700; }}
+QPushButton#navigationItem[compact="true"] {{ text-align: center; padding: 3px 2px; font-size: 11px; }}
 QPushButton#navigationCollapse {{ border: none; background: transparent; text-align: right; color: {tokens.text_secondary}; }}
 QLabel#runtimeLabel {{ color: #646b72; font-size: 10px; font-weight: 600; }}
 QComboBox#runtimeSelector {{ color: #30363b; background: {tokens.surface}; border: 1px solid {tokens.border_strong}; border-radius: 3px; min-height: 26px; padding: 1px 6px; }}

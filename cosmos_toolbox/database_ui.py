@@ -5,11 +5,13 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -110,10 +112,22 @@ class DatabasePage(QWidget):
         self.detail.setPlaceholderText("双击数据单元格，在此查看完整内容（NULL 与空字符串分别显示）。")
         self.detail_tabs = QTabWidget()
         self.inspector = InspectionDetailPanel()
-        self.detail_tabs.addTab(self.inspector, "检查项详情")
+        inspector_scroll = QScrollArea()
+        inspector_scroll.setWidgetResizable(True)
+        inspector_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inspector_scroll.setWidget(self.inspector)
+        self.detail_tabs.addTab(inspector_scroll, "检查项详情")
         self.detail_tabs.addTab(self.detail, "单元格原文")
         splitter.addWidget(self.detail_tabs)
-        splitter.setSizes([300, 320])
+        # The record table is the main content: keep it readable on short
+        # windows and let the detail pane give up space (or be dragged shut).
+        tabs.setMinimumHeight(180)
+        self.detail_tabs.setMinimumHeight(120)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, True)
+        splitter.setSizes([360, 260])
         layout.addWidget(splitter, 1)
         self.data.cellDoubleClicked.connect(self.show_detail)
         navigation = QHBoxLayout()

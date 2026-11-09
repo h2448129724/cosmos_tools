@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QScrollArea,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,6 +26,7 @@ from apps.data_tools.processing.batch_crop import crop_single_image
 from img_tools.core.image_cache import ImagePrefetcher, neighbours
 from img_tools.ui.qt_image import bind_cache_to_widget
 from cosmos_toolbox.ui.primitives import PathField, set_ui_role
+from cosmos_toolbox.ui.shortcuts import bind_page_shortcuts
 from img_tools.core.crop_plan import CropRegion, allocate_crop_names, build_image_crop_plan
 from img_tools.core.fixed_roi import resolve_fixed_boxes, resize_fixed_box
 
@@ -126,14 +128,14 @@ class SingleCropPage(BaseToolPage):
         self._actual_button = self._action_button("1:1", "按原始像素显示", self._zoom_actual)
         for button in (self._zoom_out_button, self._zoom_in_button, self._fit_button, self._actual_button):
             zoom_row.addWidget(button)
-        zoom_row.addStretch(1)
         zoom_hint = QLabel("滚轮缩放，中键拖动画布，A / D 切图")
         set_ui_role(zoom_hint, "muted")
-        zoom_row.addWidget(zoom_hint)
+        zoom_hint.setWordWrap(True)  # may wrap instead of forcing the page wider
+        zoom_row.addWidget(zoom_hint, 1)
         left_lay.addLayout(zoom_row)
 
         self._preview = ZoomableLabel()
-        self._preview.setMinimumSize(560, 460)
+        self._preview.setMinimumSize(400, 300)
         self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._preview.setAccessibleName("图片预览与 ROI 画布")
         self._preview.setAutoFillBackground(True)
@@ -235,7 +237,7 @@ class SingleCropPage(BaseToolPage):
         right_lay.addWidget(list_label)
         self._file_list = QListWidget()
         self._file_list.setAccessibleName("图片文件列表")
-        self._file_list.setMinimumHeight(160)
+        self._file_list.setMinimumHeight(140)
         self._file_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._file_list.currentRowChanged.connect(self._show_file_at)
         right_lay.addWidget(self._file_list, 1)
@@ -245,31 +247,36 @@ class SingleCropPage(BaseToolPage):
         self._log.setMaximumHeight(120)
         right_lay.addWidget(self._log)
 
+        # The task column is taller than small windows; scroll it rather than
+        # letting the image list and the log overlap.
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right)
+        right_scroll.viewport().setAutoFillBackground(False)
+        right.setAutoFillBackground(False)
+        right_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        right_scroll.setMinimumWidth(right.minimumWidth() + 14)
+        right_scroll.setMaximumWidth(right.maximumWidth() + 14)
         splitter.addWidget(left)
-        splitter.addWidget(right)
+        splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         splitter.setSizes([920, 320])
         lay.addWidget(splitter, 1)
         self._update_task_panel()
         self._update_zoom_label()
+        # Shortcuts also work while the image list has focus (it would otherwise
+        # swallow letters for type-ahead search); spin boxes keep the event filter.
+        bind_page_shortcuts(self, {Qt.Key.Key_A: lambda: self._show_offset(-1),
+                                   Qt.Key.Key_D: lambda: self._show_offset(1)})
 
     def eventFilter(self, watched, event):  # noqa: N802 - Qt interface
         if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_A, Qt.Key.Key_D):
             self._show_offset(-1 if event.key() == Qt.Key.Key_A else 1)
             return True
         return super().eventFilter(watched, event)
-
-    def keyPressEvent(self, event):  # noqa: N802 - Qt interface
-        if event.key() == Qt.Key.Key_A:
-            self._show_offset(-1)
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_D:
-            self._show_offset(1)
-            event.accept()
-            return
-        super().keyPressEvent(event)
 
     def _pick_dir(self, entry: QLineEdit):
         directory = QFileDialog.getExistingDirectory(self._mw, "选择目录", entry.text() or ".")

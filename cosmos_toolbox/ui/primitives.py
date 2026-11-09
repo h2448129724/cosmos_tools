@@ -102,7 +102,11 @@ class FlowLayout(QLayout):
         line_height = 0
         for item in self._items:
             widget = item.widget()
-            if widget is not None and not widget.isVisible() and not test_only:
+            # Skip only explicitly hidden widgets.  ``isVisible()`` is False for
+            # every child while an ancestor is hidden, which used to leave all
+            # buttons unplaced (stacked at 0,0) when a page was laid out before
+            # being shown; height must also be measured with the same rule.
+            if widget is not None and widget.isHidden():
                 continue
             hint = item.sizeHint()
             next_x = x + hint.width() + self._h_spacing

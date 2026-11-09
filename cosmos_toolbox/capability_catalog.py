@@ -369,6 +369,35 @@ _NAV_PLACEMENT: dict[str, tuple[ActivityStage, int]] = {
 }
 
 
+# Labels for the narrow navigation rail (window < 1180 px): at most four
+# characters, unique, and still recognisable without the group headings.
+SHORT_TITLES: dict[str, str] = {
+    "overview": "概览",
+    "cabf.workflow": "标注流程",
+    "cabf.graph_editor": "点边标注",
+    "cabf.config_studio": "ROI配置",
+    "data.sample_review": "样本审阅",
+    "annotation.visualize": "标注查看",
+    "annotation.point_mark": "点位导出",
+    "data.ng_extract": "NG提取",
+    "data.database": "数据库",
+    "image": "图片浏览",
+    "images.png_compress": "图片压缩",
+    "data.batch_crop": "批量裁剪",
+    "data.single_crop": "逐张裁剪",
+    "data.tile_crop": "自动分块",
+    "data.keyword_split": "关键字",
+    "data.inner_mask": "内侧Mask",
+    "data.roi_editor": "YAML ROI",
+    "project.artifacts": "产物",
+    "project.tasks": "任务",
+}
+
+
+def short_title(key: str, title: str) -> str:
+    return SHORT_TITLES.get(key) or title[:4]
+
+
 def _place(planned: Iterable[PlannedCapability]) -> list[PlannedCapability]:
     placed = []
     for item in planned:
