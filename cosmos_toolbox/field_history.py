@@ -24,8 +24,18 @@ COMPATIBLE_CORE_PAIRS = {
         '8e6cb69638880bd9e2ebb1fb138fbd6768777c01fa5f4660c97f61a15b758520',
     )
 }
+# Audited 2026-09-30: only committed-file validation and export control changed;
+# image identity, inference, crops and labels are unchanged. Keep prior pairs.
+COMPATIBLE_CORE_PAIRS |= {
+    (old, new)
+    for old in {value for pair in COMPATIBLE_CORE_PAIRS for value in pair}
+    for new in (
+        'ee07ba19b66472bbf79dd557ca5253d5dd4fa8aff152060f27a9ca5ee629bcf7',
+        '494c6e40d887c6ed6dff64b75c9b1d018f45439d21e2559312a2afee07f3ec32',
+    )
+}
 PRESENTATION_FILES = {'field_dataset_ui.py', 'field_dataset_runtime.py',
-                      'field_dataset_export.py', 'field_history.py'}
+                      'field_dataset_export.py', 'field_history.py', 'field_batch.py'}
 
 
 def read_run(path):
@@ -232,7 +242,8 @@ def export_history_jobs(jobs, control, on_progress):
                     if not any(model in data['selected'] for model in models):
                         skipped.append({'source': source, 'reason': '选中运行没有已完成模型结果'})
                         continue
-                    report = export(workspace, data['selected'], source=data['source'], run_id=data['run_id'], scope='current')
+                    report = export(workspace, data['selected'], source=data['source'], run_id=data['run_id'],
+                                    scope='current', control=control, on_progress=on_progress)
                     results.append({'source': data['source'], 'output': str(workspace),
                                     'run_id': data['run_id'], 'export': report})
                     on_progress({'phase': 'export', 'message': f"导出目录：{report['directory']}；样本 {report['samples']}"})

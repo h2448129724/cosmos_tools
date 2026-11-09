@@ -55,8 +55,8 @@ def _json(path, value):
 
 
 def _intact(records):
-    return bool(records) and all(all((Path(r['directory']) / name).is_file()
-        for name in r.get('files', ['image.png', 'image.json'])) for r in records)
+    from .sample_integrity import samples_intact
+    return samples_intact(records)
 
 
 def _save_sample(folder, sample, identity, model, mode):
@@ -364,7 +364,9 @@ def run(source, output, product, selected, face='all', mode='auto', limit=None, 
                 on_progress({'phase': 'export', 'message': '正在导出本次已完成数据（含标签、preview 和报告），请等待…'
                              if stop_export else '正在生成数据集导出与 preview，请等待…'})
             summary['export'] = export(output, selected, source=source, scope=scope,
-                                       run_id=run_id if scope == 'current' else None)
+                                       run_id=run_id if scope == 'current' else None,
+                                       control=None if stop_export else control, on_progress=on_progress)
+            summary['stopped'] = summary['stopped'] or summary['export'].get('stopped', False)
         _json(output / 'summary.json', summary)
         return summary
     finally:

@@ -127,6 +127,33 @@ def build_image_crop_plan(
     return ImageCropPlan(tuple(operations), tuple(rejections))
 
 
+def allocate_crop_names(
+    stem: str,
+    suffix: str,
+    count: int,
+    taken: Iterable[str],
+) -> tuple[str, ...]:
+    """Return ``count`` unused ``{stem}_roi_{n}{suffix}`` names.
+
+    Existing names and names already handed out in this call are both skipped,
+    so a later crop of the same image cannot overwrite an earlier file.
+    """
+
+    if count < 0:
+        raise ValueError("裁剪数量不能小于 0")
+    used = set(taken)
+    names: list[str] = []
+    number = 1
+    while len(names) < count:
+        candidate = f"{stem}_roi_{number}{suffix}"
+        number += 1
+        if candidate in used:
+            continue
+        used.add(candidate)
+        names.append(candidate)
+    return tuple(names)
+
+
 def _map_region(
     region: CropRegion,
     *,
@@ -165,5 +192,6 @@ __all__ = [
     "ImageCropPlan",
     "ScaleSemantics",
     "SuffixMode",
+    "allocate_crop_names",
     "build_image_crop_plan",
 ]

@@ -10,6 +10,13 @@ import tempfile
 from datetime import datetime
 
 
+def _source_text(row, kind):
+    """原图用相机文件 filename；只有该列为空时才退回缓存列 raw_image。"""
+    if kind == 'raw':
+        return (row.get('filename') or '').strip() or (row.get('raw_image') or '').strip()
+    return (row.get('result_image') or '').strip()
+
+
 def scan(database, project='CAB-F', product='', start='', end='', exclude_misjudged=False,
          kinds=('raw',), old_root='', new_root=''):
     database = Path(database).expanduser().resolve()
@@ -62,7 +69,7 @@ def scan(database, project='CAB-F', product='', start='', end='', exclude_misjud
     files = {}
     for row in rows:
         for kind in dict.fromkeys(kinds):
-            original = row.get(kind + '_image') or ''
+            original = _source_text(row, kind)
             path = Path(original) if original else None
             if path is not None:
                 if old_root and path.is_relative_to(Path(old_root)):

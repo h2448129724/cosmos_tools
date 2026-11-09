@@ -6,7 +6,6 @@ import json
 import math
 import shutil
 import sqlite3
-import struct
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,14 +24,16 @@ def _part(value):
 
 
 def _dimensions(path):
-    with path.open('rb') as stream:
-        header = stream.read(24)
-    if len(header) != 24 or header[:8] != b'\x89PNG\r\n\x1a\n' or header[12:16] != b'IHDR':
-        raise ValueError(f'Invalid PNG header: {path.name}')
-    width, height = struct.unpack('>II', header[16:24])
-    if not width or not height:
-        raise ValueError('Empty image dimensions')
-    return width, height
+    from .sample_integrity import image_dimensions
+    return image_dimensions(path)
+
+
+def _checkpoint(control):
+    if control is not None:
+        while control.paused.is_set() and not control.stopped.wait(.1):
+            pass
+        return not control.stopped.is_set()
+    return True
 
 
 def _copy(source, target):
@@ -40,7 +41,7 @@ def _copy(source, target):
     shutil.copyfile(source, target)
 
 
-def flatten_snapshot(snapshot, destination=None):
+def flatten_snapshot(snapshot, destination=None, *, control=None):
     """Create portable per-model training folders from a validated candidate export."""
     snapshot = Path(snapshot).resolve()
     validation = json.loads((snapshot / 'validation.json').read_text(encoding='utf-8'))
@@ -69,6 +70,8 @@ def flatten_snapshot(snapshot, destination=None):
                     if previous != format_name:
                         raise ValueError(f'Mixed training formats for {model.name}')
                 for path in sorted(source.rglob('*')):
+                    if not _checkpoint(control):
+                        raise InterruptedError('训练格式整理已停止，部分输出保留')
                     relative = path.relative_to(source)
                     target = root / relative
                     if path.is_dir():
@@ -102,7 +105,8 @@ def flatten_snapshot(snapshot, destination=None):
     return report
 
 
-def export(output, models=None, *, xany_only=True, source=None, run_id=None, scope='current'):
+def export(output, models=None, *, xany_only=True, source=None, run_id=None, scope='current',
+           control=None, on_progress=None):
     """Export a fresh snapshot; never overwrite earlier exports or source annotations.
 
     The returned report describes structural validation, not annotation accuracy.
@@ -135,13 +139,16 @@ def export(output, models=None, *, xany_only=True, source=None, run_id=None, sco
     stamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     destination = output / 'exports' / f'{source_name}_candidates_{stamp}_{time.time_ns()}'
     destination.mkdir(parents=True, exist_ok=False)
+    incomplete = destination / 'INCOMPLETE.txt'
+    incomplete.write_text('Export is incomplete. Read export_state.json before using this dataset.\n', encoding='utf-8')
+    _write(destination / 'export_state.json', {'status': 'running'})
     (destination / 'preview').mkdir()
     report = {'directory': str(destination), 'annotation_status': 'review',
               'scope': scope, 'run_id': run_id,
               'format': 'xanylabeling' if xany_only else 'multi_format',
               'verified_ground_truth': False, 'samples': 0, 'models': {}, 'errors': [],
-              'preview_samples': 0, 'preview_errors': [],
-              'validation_scope': 'PNG headers, dimensions, label classes/coordinates, pairing; no model accuracy claim'}
+              'preview_samples': 0, 'preview_errors': [], 'stopped': False,
+              'validation_scope': 'Full image decoding, dimensions, label classes/coordinates, pairing; no model accuracy claim'}
     selected = set(models) if models is not None else None
     with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
         if scope == 'history':
@@ -153,6 +160,8 @@ def export(output, models=None, *, xany_only=True, source=None, run_id=None, sco
     detection_classes = {}
     detection_tasks = {}
     for model, details in rows:
+        if report['stopped']:
+            break
         if selected is not None and model not in selected:
             continue
         try:
@@ -163,6 +172,9 @@ def export(output, models=None, *, xany_only=True, source=None, run_id=None, sco
             report['errors'].append({'model': model, 'error': str(exc)})
             continue
         for record in records:
+            if not _checkpoint(control):
+                report['stopped'] = True
+                break
             if not isinstance(record, dict):
                 report['errors'].append({'model': model, 'error': 'Invalid sample record'})
                 continue
@@ -344,6 +356,9 @@ def export(output, models=None, *, xany_only=True, source=None, run_id=None, sco
                                   'classification': class_name,
                                   'image': name + '.png', 'annotation_status': 'review',
                                   'original_sample_directory': str(folder), 'verified_ground_truth': False})
+                if on_progress:
+                    on_progress({'phase': 'export', 'message': f"已导出 {report['samples']} 个样本：{name}",
+                                 'export_samples': report['samples']})
             except Exception as exc:
                 report['errors'].append({'model': model, 'sample': record.get('directory'), 'error': str(exc)})
     for relative, classes in detection_classes.items():
@@ -390,7 +405,8 @@ def export(output, models=None, *, xany_only=True, source=None, run_id=None, sco
         'YOLO empty detections are excluded from training folders and retained in X-AnyLabeling.\n'
         'Classification folders and segmentation masks contain pseudo-labels, not human ground truth.\n'
         'Original sources and model versions are recorded in manifest.jsonl.\n'), encoding='utf-8')
-    report['valid'] = not report['errors']
+    report['stopped'] = report['stopped'] or bool(control and control.stopped.is_set())
+    report['valid'] = not report['errors'] and not report['stopped']
     report['preview_valid'] = not report['preview_errors']
     (destination / 'preview' / 'README.txt').write_text(
         'Review-only JPEG overlays grouped by model/check task. Do not use as training images.\n'
@@ -400,6 +416,18 @@ def export(output, models=None, *, xany_only=True, source=None, run_id=None, sco
         'See validation.json preview_errors for visualization failures.\n', encoding='utf-8')
     _write(destination / 'validation.json', report)
     if report['valid'] and not xany_only:
-        report['training_dataset'] = flatten_snapshot(destination)
+        try:
+            report['training_dataset'] = flatten_snapshot(destination, control=control)
+        except InterruptedError:
+            report.update(stopped=True, valid=False)
+        except Exception as exc:
+            report['errors'].append({'phase': 'training_format', 'error': f'{type(exc).__name__}: {exc}'})
+            report['valid'] = False
         _write(destination / 'validation.json', report)
+    report['status'] = 'stopped' if report['stopped'] else ('failed' if report['errors'] else 'complete')
+    _write(destination / 'validation.json', report)
+    _write(destination / 'export_state.json', {'status': report['status'], 'samples': report['samples'],
+                                            'preview_valid': report['preview_valid']})
+    if report['status'] == 'complete':
+        incomplete.unlink()
     return report

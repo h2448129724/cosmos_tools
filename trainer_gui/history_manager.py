@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import shutil
 import sys
+import unicodedata
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -23,16 +25,75 @@ class HistoryManager:
             self.history_path.write_text("", encoding="utf-8")
 
     def create_run_paths(self, feature: FeatureModule, action: FeatureAction, project_name: str) -> dict[str, Path]:
-        safe_project = (project_name or feature.default_project_name or "default").strip() or "default"
-        timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-        run_dir = self.runs_root / safe_project / feature.feature_name / action.action_name / timestamp
-        run_dir.mkdir(parents=True, exist_ok=True)
+        # These values are displayed in the GUI and come from module metadata or
+        # user input.  Treat each one as a single path component: a name such as
+        # ``../outside`` must never be able to redirect a run out of ``runs``.
+        safe_project = self._safe_component(
+            project_name or feature.default_project_name or "default", "default"
+        )
+        safe_feature = self._safe_component(feature.feature_name, "feature")
+        safe_action = self._safe_component(action.action_name, "action")
+        parent_dir = self.runs_root / safe_project / safe_feature / safe_action
+        self._assert_contained(parent_dir, self.runs_root)
+
+        # ``exist_ok=True`` with a second-resolution timestamp caused concurrent
+        # launches to share one output directory and overwrite each other's logs.
+        # Keep the familiar timestamp as the visible prefix, adding microseconds
+        # (and a deterministic collision suffix for mocked clocks) to make each
+        # directory allocation atomic and unique.
+        timestamp_base = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+        for collision in range(1000):
+            timestamp = timestamp_base if collision == 0 else f"{timestamp_base}-{collision}"
+            run_dir = parent_dir / timestamp
+            self._assert_contained(run_dir, self.runs_root)
+            try:
+                run_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                continue
+            break
+        else:  # pragma: no cover - requires a pathological pre-existing directory set
+            raise FileExistsError(f"无法为训练运行分配唯一目录: {parent_dir}")
+
         return {
             "project_name": Path(safe_project),
             "run_dir": run_dir,
             "artifacts_dir": run_dir,
             "timestamp": Path(timestamp),
         }
+
+    @staticmethod
+    def _safe_component(value: object, fallback: str) -> str:
+        """Return a safe, readable single path component.
+
+        Both slash variants are replaced explicitly because metadata can be
+        authored on another operating system.  Windows-invalid characters,
+        control characters, trailing dots/spaces, and reserved device names are
+        handled as well; this keeps the same metadata usable on either platform.
+        """
+
+        text = unicodedata.normalize("NFC", str(value or "")).strip()
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', "_", text)
+        text = text.strip(" .")
+        if not text or text in {".", ".."}:
+            return fallback
+
+        stem = text.split(".", 1)[0].upper()
+        if stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"COM[1-9]", stem) or re.fullmatch(
+            r"LPT[1-9]", stem
+        ):
+            return f"_{text}"
+        return text
+
+    @staticmethod
+    def _assert_contained(path: Path, root: Path) -> None:
+        """Reject paths escaping ``root``, including through symlinked parents."""
+
+        resolved_root = root.resolve()
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError(f"运行路径必须位于 runs 目录内: {path}") from exc
 
     def init_run_record(
         self,

@@ -2,6 +2,7 @@ import json
 import sys
 import threading
 import types
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -34,9 +35,15 @@ def source_image(tmp_path):
 def test_multi_model_one_decode_resume_and_preserve_annotation(tmp_path, fake_models, monkeypatch):
     source = source_image(tmp_path)
     output = tmp_path / 'output'
-    original = cv2.imdecode
+    original = np.fromfile
     calls = []
-    monkeypatch.setattr(cv2, 'imdecode', lambda *a: (calls.append(1), original(*a))[1])
+    def read_image(path, *args, **kwargs):
+        if Path(path).parent == source:
+            calls.append(path)
+        return original(path, *args, **kwargs)
+    # Full integrity checks decode saved crops too; only original-image reads
+    # are constrained to once per generation (and zero on resume).
+    monkeypatch.setattr(np, 'fromfile', read_image)
     args = dict(source=source, output=output, product='D01-R', selected=['tail_roi_detector', 'roi_detector'])
     assert core.run(**args)['completed_model_jobs'] == 2
     annotation = next((output / 'datasets').rglob('image.json'))

@@ -169,6 +169,35 @@ class ZoomableLabel(QWidget):
         """Return accumulated ROI rectangles in image coordinates."""
         return list(self._rects_image)
 
+    def set_roi_rects(
+        self,
+        rects: list[tuple[int, int, int, int]],
+        *,
+        selected: int | None = None,
+    ) -> None:
+        """Replace ROI rectangles using image coordinates."""
+        normalized: list[tuple[int, int, int, int]] = []
+        for rect in rects:
+            x1, y1, x2, y2 = (int(value) for value in rect)
+            if x2 < x1:
+                x1, x2 = x2, x1
+            if y2 < y1:
+                y1, y2 = y2, y1
+            if x2 > x1 and y2 > y1:
+                normalized.append((x1, y1, x2, y2))
+        self._rects_image = normalized
+        if not normalized:
+            self._set_selected_rect_index(-1)
+        elif selected is None:
+            self._set_selected_rect_index(len(normalized) - 1)
+        else:
+            self._set_selected_rect_index(min(max(selected, 0), len(normalized) - 1))
+        self.rectsChanged.emit()
+        self.update()
+
+    def selected_rect_index(self) -> int:
+        return self._rect_selected_index
+
     def set_selected_rect_index(self, index: int) -> None:
         if index < 0 or index >= len(self._rects_image):
             self._set_selected_rect_index(-1)
@@ -211,18 +240,44 @@ class ZoomableLabel(QWidget):
         sh = ih * self._zoom
         return sx, sy, sw, sh
 
-    def set_pixmap(self, pixmap, *, preserve_rects: bool = False):
+    def set_pixmap(self, pixmap, *, preserve_rects: bool = False, preserve_view: bool = False):
+        zoom = self._zoom
+        offset_x = self._offset_x
+        offset_y = self._offset_y
         self._pixmap = pixmap
-        self._zoom = 1.0
-        self._offset_x = 0
-        self._offset_y = 0
         self._marker_point = None
+        if preserve_view:
+            self._zoom = zoom
+            self._offset_x = offset_x
+            self._offset_y = offset_y
+        else:
+            self._zoom = 1.0
+            self._offset_x = 0
+            self._offset_y = 0
         if not preserve_rects:
             self._rects_image.clear()
             self._set_selected_rect_index(-1)
             self.rectsChanged.emit()
-        self.fit_to_view()
-        self.update()
+        if preserve_view:
+            self.update()
+        else:
+            self.fit_to_view()
+            self.update()
+
+    def zoom_by(self, factor: float) -> None:
+        """Zoom around the centre of the preview."""
+        if self._pixmap is None or self._pixmap.isNull() or factor <= 0:
+            return
+        self._zoom_at(self._zoom * factor, self.width() / 2, self.height() / 2)
+
+    def set_zoom_factor(self, factor: float) -> None:
+        """Set an absolute zoom around the centre of the preview."""
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        self._zoom_at(factor, self.width() / 2, self.height() / 2)
+
+    def zoom_factor(self) -> float:
+        return self._zoom
 
     def _find_rect_at(self, ix: int, iy: int) -> int:
         for index in range(len(self._rects_image) - 1, -1, -1):
@@ -312,17 +367,38 @@ class ZoomableLabel(QWidget):
             y2 = max(y2, y1 + min_size)
         return self._normalize_rect((x1, y1, x2, y2))
 
-    def fit_to_view(self):
+    def fit_to_view(self, *, allow_upscale: bool = False):
         if self._pixmap is None or self._pixmap.isNull():
             return
         pw, ph = self.width() - 20, self.height() - 20
         iw, ih = self._pixmap.width(), self._pixmap.height()
-        if iw <= 0 or ih <= 0:
+        if pw <= 1 or ph <= 1 or iw <= 0 or ih <= 0:
             return
-        self._zoom = min(pw / iw, ph / ih, 1.0)
+        scale = min(pw / iw, ph / ih)
+        if not allow_upscale:
+            scale = min(scale, 1.0)
+        self._zoom = max(scale, 0.02)
         self._offset_x = 0
         self._offset_y = 0
         self.zoomChanged.emit(self._zoom)
+        self.update()
+
+    def _zoom_at(self, target_zoom: float, anchor_x: float, anchor_y: float) -> None:
+        if self._pixmap is None or self._pixmap.isNull() or self._zoom <= 0:
+            return
+        zoom = max(0.02, min(16.0, target_zoom))
+        pw, ph = self.width(), self.height()
+        scaled_w = self._pixmap.width() * self._zoom
+        scaled_h = self._pixmap.height() * self._zoom
+        image_x = (anchor_x - (pw - scaled_w) / 2 - self._offset_x) / self._zoom
+        image_y = (anchor_y - (ph - scaled_h) / 2 - self._offset_y) / self._zoom
+        self._zoom = zoom
+        new_scaled_w = self._pixmap.width() * zoom
+        new_scaled_h = self._pixmap.height() * zoom
+        self._offset_x = anchor_x - (pw - new_scaled_w) / 2 - image_x * zoom
+        self._offset_y = anchor_y - (ph - new_scaled_h) / 2 - image_y * zoom
+        self.zoomChanged.emit(self._zoom)
+        self.update()
 
     # ---- Painting ----
     def paintEvent(self, event):
@@ -447,11 +523,14 @@ class ZoomableLabel(QWidget):
 
     # ---- Mouse events ----
     def wheelEvent(self, event: QWheelEvent):
-        delta = event.angleDelta().y()
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta == 0 or self._pixmap is None or self._pixmap.isNull():
+            event.ignore()
+            return
         factor = 1.15 if delta > 0 else 1 / 1.15
-        self._zoom = max(0.01, min(10.0, self._zoom * factor))
-        self.zoomChanged.emit(self._zoom)
-        self.update()
+        pos = event.position()
+        self._zoom_at(self._zoom * factor, pos.x(), pos.y())
+        event.accept()
 
     def mousePressEvent(self, event: QMouseEvent):
         pos = event.position()

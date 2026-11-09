@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 import cv2
@@ -13,6 +14,27 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from torch.utils.data import Dataset
+
+
+def collect_training_pairs(image_dir, annotation_dir):
+    """Match mirrored annotation trees by relative path, never basename alone."""
+    root, annotations = Path(image_dir), Path(annotation_dir)
+    images = sorted(path for path in root.rglob('*')
+                    if path.is_file() and path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'})
+    pairs, seen = [], set()
+    for image in images:
+        relative = image.relative_to(root).with_suffix('')
+        identity = str(relative).casefold()
+        if identity in seen:
+            raise ValueError(f'多张图片对应同一标注：{relative}')
+        seen.add(identity)
+        base = annotations / image.relative_to(root)
+        candidates = [base.with_suffix('.json'), base.with_suffix('.png')]
+        annotation = next((path for path in candidates if path.is_file()), None)
+        pairs.append((str(image), str(annotation) if annotation else None))
+    if not pairs:
+        raise ValueError(f'图片目录没有可训练图片：{root}')
+    return pairs
 
 
 class BinarySegmentationDataset(Dataset):

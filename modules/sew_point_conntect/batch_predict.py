@@ -12,6 +12,7 @@ from .datasets import collect_json_files, load_annotation
 from .infer import POSTPROCESS_PRESETS, resolve_postprocess_params
 from .runtime import TorchConnectorRuntime
 from .evaluation_core import compare_edges, edge_metrics, normalize_edges, summarize_counts
+from apps.cabf_flow.annotation_source_core import canonical_point_label
 # cabf is imported lazily inside the functions that need it so this entry point
 # stays importable without cabf on the path (direct `python -m` execution),
 # matching sew_point.utils. cabf is on path in every real run — trainer_gui
@@ -49,7 +50,9 @@ def load_labelme_points(annotation: dict) -> list[dict]:
             continue
         if shape.get("shape_type") != "point":
             continue
-        if str(shape.get("label", "")).strip() != "sew":
+        # Reuse the CAB-F source-selection policy so historical ``keypoint``
+        # LabelMe annotations follow the same canonical path as ``sew``.
+        if canonical_point_label(shape.get("label", "")) != "sew":
             continue
         raw_points = shape.get("points", [])
         if not raw_points or len(raw_points[0]) < 2:

@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -21,6 +22,7 @@ from .run_plan import (
 
 WINDOWS_NO_WINDOW_FLAGS = 0
 WINDOWS_STARTUPINFO = None
+SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 if os.name == "nt":
     WINDOWS_NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -41,6 +43,10 @@ class RunManager(QObject):
         self.history_manager = history_manager
         self.active_runs: dict[str, subprocess.Popen] = {}
         self.stopped_runs: set[str] = set()
+        self._watchers: dict[str, threading.Thread] = {}
+        self._start_gates: dict[str, threading.Event] = {}
+        self._start_signal_threads: dict[str, int] = {}
+        self._state_lock = threading.RLock()
 
     def start_run(
         self,
@@ -108,46 +114,148 @@ class RunManager(QObject):
 
         stdout_path = Path(record.stdout_log)
         stderr_path = Path(record.stderr_log)
-        stdout_handle = stdout_path.open("w", encoding="utf-8")
-        stderr_handle = stderr_path.open("w", encoding="utf-8")
+        stdout_handle = None
+        stderr_handle = None
+        try:
+            stdout_handle = stdout_path.open("w", encoding="utf-8")
+            stderr_handle = stderr_path.open("w", encoding="utf-8")
+            process = subprocess.Popen(
+                command,
+                cwd=str(cwd),
+                env=process_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                startupinfo=WINDOWS_STARTUPINFO,
+                creationflags=WINDOWS_NO_WINDOW_FLAGS,
+            )
+        except Exception as exc:
+            # A launch failure happens after the run metadata is created.  Close
+            # every handle and finalize that record so it cannot remain a false
+            # ``running`` entry forever.  Re-raise for the existing GUI error UI.
+            self._record_startup_failure(record, exc, stderr_handle)
+            self._close_handles(stdout_handle, stderr_handle)
+            raise
 
-        process = subprocess.Popen(
-            command,
-            cwd=str(cwd),
-            env=process_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            startupinfo=WINDOWS_STARTUPINFO,
-            creationflags=WINDOWS_NO_WINDOW_FLAGS,
-        )
-        self.active_runs[record.run_id] = process
-        self.run_started.emit(record)
+        reader_thread_list: list[threading.Thread | None] = []
+        reader_threads: tuple[threading.Thread | None, ...] = ()
+        start_gate = threading.Event()
+        try:
+            with self._state_lock:
+                # Keep registration and reader startup under the same lock as
+                # the active-process assignment so shutdown cannot miss this
+                # run in the hand-off window.
+                try:
+                    self.active_runs[record.run_id] = process
+                    reader_thread_list.append(
+                        self._start_stream_thread(process.stdout, stdout_handle, record.run_id, "stdout")
+                    )
+                    reader_thread_list.append(
+                        self._start_stream_thread(process.stderr, stderr_handle, record.run_id, "stderr")
+                    )
+                    reader_threads = tuple(reader_thread_list)
+                    watcher = threading.Thread(
+                        target=self._wait_for_process,
+                        args=(record, process, stdout_handle, stderr_handle, reader_threads, start_gate),
+                        daemon=True,
+                    )
+                    self._watchers[record.run_id] = watcher
+                    self._start_gates[record.run_id] = start_gate
+                    self._start_signal_threads[record.run_id] = threading.get_ident()
+                    # Start while holding the state lock.  If Thread.start
+                    # fails, cleanup below removes ownership before shutdown
+                    # can observe an unstarted watcher.
+                    watcher.start()
+                except Exception:
+                    self.active_runs.pop(record.run_id, None)
+                    self._watchers.pop(record.run_id, None)
+                    self._start_gates.pop(record.run_id, None)
+                    self._start_signal_threads.pop(record.run_id, None)
+                    raise
+        except Exception as exc:
+            self._recover_after_setup_failure(
+                record,
+                process,
+                stdout_handle,
+                stderr_handle,
+                tuple(reader_thread_list),
+                exc,
+                start_gate,
+            )
+            raise
 
-        self._start_stream_thread(process.stdout, stdout_handle, record.run_id, "stdout")
-        self._start_stream_thread(process.stderr, stderr_handle, record.run_id, "stderr")
-
-        watcher = threading.Thread(
-            target=self._wait_for_process,
-            args=(record, process, stdout_handle, stderr_handle),
-            daemon=True,
-        )
-        watcher.start()
+        # The watcher is already alive, but waits at start_gate.  This lets a
+        # synchronous start callback request shutdown safely while guaranteeing
+        # that completion cannot precede the public start event.
+        try:
+            self.run_started.emit(record)
+        finally:
+            start_gate.set()
+            with self._state_lock:
+                self._start_signal_threads.pop(record.run_id, None)
         return record
 
     def stop_run(self, run_id: str) -> None:
-        process = self.active_runs.get(run_id)
-        if process and process.poll() is None:
+        with self._state_lock:
+            process = self.active_runs.get(run_id)
+            if process is None:
+                return
+            already_requested = run_id in self.stopped_runs
+            # Record the user's intent even if the process won the race and has
+            # already exited; the watcher will then report ``stopped``.
             self.stopped_runs.add(run_id)
+        if not already_requested and process.poll() is None:
             self._terminate_process_tree(process)
 
     def shutdown(self) -> None:
         """Request cancellation of every process still owned by the manager."""
-        for run_id in tuple(self.active_runs):
+        with self._state_lock:
+            run_ids = tuple(self.active_runs)
+        for run_id in run_ids:
             self.stop_run(run_id)
+
+        # Do not let the embedding GUI close while worker threads still own log
+        # handles or may emit a final signal.  A stubborn process is escalated to
+        # kill after a bounded wait, while normal runs drain and join naturally.
+        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
+        with self._state_lock:
+            watchers = tuple(self._watchers.items())
+            start_gates = tuple(
+                (run_id, self._start_gates.get(run_id), self._start_signal_threads.get(run_id))
+                for run_id in self._watchers
+            )
+        current_thread_id = threading.get_ident()
+        for _run_id, start_gate, signal_thread_id in start_gates:
+            if start_gate is None or start_gate.is_set():
+                continue
+            if signal_thread_id is not None and signal_thread_id != current_thread_id:
+                # Another thread is in the synchronous run_started emission;
+                # wait for its finally block instead of allowing completion to
+                # race ahead of the public start signal.
+                start_gate.wait()
+            else:
+                # This is the start callback itself calling shutdown.  Release
+                # the gate so shutdown can join the watcher without deadlock.
+                start_gate.set()
+        for run_id, watcher in watchers:
+            if watcher is threading.current_thread():
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            watcher.join(remaining)
+            if watcher.is_alive():
+                with self._state_lock:
+                    process = self.active_runs.get(run_id)
+                if process is not None and process.poll() is None:
+                    try:
+                        process.kill()
+                    except (OSError, AttributeError):
+                        pass
+                    self._close_process_streams(process)
+                remaining = max(0.0, deadline - time.monotonic())
+                watcher.join(remaining)
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen) -> None:
@@ -163,9 +271,15 @@ class RunManager(QObject):
                 )
                 if result.returncode == 0:
                     return
-            except OSError:
+            except (OSError, AttributeError):
                 pass
-        process.terminate()
+        try:
+            process.terminate()
+        except (OSError, AttributeError):
+            try:
+                process.kill()
+            except (OSError, AttributeError):
+                pass
 
     def build_export_command_text(
         self,
@@ -336,24 +450,27 @@ class RunManager(QObject):
             return env
 
         prefix = Path(conda_env.prefix)
-        path_parts = [
-            str(prefix),
-            str(prefix / "Scripts"),
-            str(prefix / "Library" / "bin"),
-            env.get("PATH", ""),
-        ]
-        env["PATH"] = ";".join(part for part in path_parts if part)
+        path_parts = [str(prefix)]
+        if os.name == "nt":
+            path_parts.extend((str(prefix / "Scripts"), str(prefix / "Library" / "bin")))
+        else:
+            path_parts.append(str(prefix / "bin"))
+        path_parts.append(env.get("PATH", ""))
+        env["PATH"] = os.pathsep.join(part for part in path_parts if part)
         env["CONDA_DEFAULT_ENV"] = conda_env.name
         env["CONDA_PREFIX"] = conda_env.prefix
         return env
 
-    def _start_stream_thread(self, stream, handle, run_id: str, stream_name: str) -> None:
+    def _start_stream_thread(self, stream, handle, run_id: str, stream_name: str) -> threading.Thread | None:
+        if stream is None:
+            return None
         thread = threading.Thread(
             target=self._stream_reader,
             args=(stream, handle, run_id, stream_name),
             daemon=True,
         )
         thread.start()
+        return thread
 
     def _stream_reader(self, stream, handle, run_id: str, stream_name: str) -> None:
         try:
@@ -370,15 +487,110 @@ class RunManager(QObject):
         process: subprocess.Popen,
         stdout_handle,
         stderr_handle,
+        reader_threads: tuple[threading.Thread | None, ...] = (),
+        start_gate: threading.Event | None = None,
     ) -> None:
-        exit_code = process.wait()
-        stdout_handle.close()
-        stderr_handle.close()
-        self.active_runs.pop(record.run_id, None)
-        if record.run_id in self.stopped_runs:
+        if start_gate is not None:
+            start_gate.wait()
+        exit_code: int | None = None
+        try:
+            exit_code = process.wait()
+        except Exception:
+            # ``Popen.wait`` normally only raises for an invalid process object;
+            # still finalize the record if a test double or platform edge case
+            # violates that assumption.
+            try:
+                exit_code = process.poll()
+            except Exception:
+                exit_code = None
+
+        # A process can exit while its pipes still contain buffered output.
+        # Join readers before closing files, writing metadata, or emitting the
+        # completion signal so consumers observe complete logs.
+        for reader in reader_threads:
+            if reader is not None and reader is not threading.current_thread():
+                reader.join()
+        self._close_handles(stdout_handle, stderr_handle)
+
+        with self._state_lock:
+            self.active_runs.pop(record.run_id, None)
+            was_stopped = record.run_id in self.stopped_runs
             self.stopped_runs.discard(record.run_id)
-            status = "stopped"
-        else:
-            status = "success" if exit_code == 0 else "failed"
-        final_record = self.history_manager.finalize_run(record, status=status, exit_code=exit_code)
-        self.run_finished.emit(final_record)
+        status = "stopped" if was_stopped else ("success" if exit_code == 0 else "failed")
+        try:
+            final_record = self.history_manager.finalize_run(record, status=status, exit_code=exit_code)
+            self.run_finished.emit(final_record)
+        finally:
+            # Keep watcher ownership through finalization and signal delivery so
+            # shutdown cannot return while this run is still publishing state.
+            with self._state_lock:
+                self._watchers.pop(record.run_id, None)
+                self._start_gates.pop(record.run_id, None)
+
+    def _record_startup_failure(self, record: RunRecord, exc: Exception, stderr_handle) -> None:
+        if stderr_handle is not None:
+            try:
+                stderr_handle.write(f"Failed to start process: {exc}\n")
+                stderr_handle.flush()
+            except OSError:
+                pass
+        try:
+            self.history_manager.finalize_run(record, status="failed", exit_code=None)
+        except Exception:
+            # Preserve the original launch exception for the caller.  The
+            # metadata write is best-effort because a filesystem failure is the
+            # only way this finalization itself can fail.
+            pass
+
+    def _recover_after_setup_failure(
+        self,
+        record: RunRecord,
+        process: subprocess.Popen,
+        stdout_handle,
+        stderr_handle,
+        reader_threads: tuple[threading.Thread | None, ...],
+        exc: Exception,
+        start_gate: threading.Event | None = None,
+    ) -> None:
+        if start_gate is not None:
+            start_gate.set()
+        with self._state_lock:
+            self.active_runs.pop(record.run_id, None)
+            self._watchers.pop(record.run_id, None)
+            self._start_gates.pop(record.run_id, None)
+            self._start_signal_threads.pop(record.run_id, None)
+            self.stopped_runs.discard(record.run_id)
+        self._terminate_process_tree(process)
+        try:
+            process.wait(timeout=SHUTDOWN_TIMEOUT_SECONDS)
+        except (OSError, AttributeError, subprocess.TimeoutExpired, TypeError):
+            try:
+                process.kill()
+            except (OSError, AttributeError):
+                pass
+        self._close_process_streams(process)
+        for reader in reader_threads:
+            if reader is not None:
+                reader.join()
+        self._record_startup_failure(record, exc, stderr_handle)
+        self._close_handles(stdout_handle, stderr_handle)
+
+    @staticmethod
+    def _close_handles(*handles) -> None:
+        for handle in handles:
+            if handle is None:
+                continue
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _close_process_streams(process: subprocess.Popen) -> None:
+        for stream in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError:
+                pass

@@ -854,14 +854,46 @@ class CabfConfigActivity(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "保存 CAB-F 匹配模板", start, "PNG (*.png)")
         if not path:
             return
+        target = Path(path)
+        if target.suffix.lower() != ".png":
+            target = target.with_suffix(".png")
+        try:
+            previous_template = target.read_bytes() if target.exists() else None
+        except OSError as exc:
+            self._show_error("模板保存失败", exc)
+            return
+        if self.update_config_check.isChecked():
+            if self.document is None:
+                self._show_error("模板保存失败", CabfConfigError("尚未加载 CAB-F 配置，无法更新 match_template"))
+                return
+            # Validate the YAML patch before creating the output file.  This
+            # prevents an invalid config from leaving an orphan generated
+            # template behind.
+            try:
+                self.document.validate_template_path_update(self.side, target)
+            except Exception as exc:
+                self._show_error("模板保存失败", exc)
+                return
+        template_written = False
         try:
             saved = write_template(path, result.image)
+            template_written = True
             if self.update_config_check.isChecked():
-                if self.document is None:
-                    raise CabfConfigError("尚未加载 CAB-F 配置，无法更新 match_template")
+                assert self.document is not None
                 self.document.update_template_path(self.side, saved)
                 self.template_path_label.setText(str(saved))
         except Exception as exc:
+            # ``write_template`` may have created/overwritten the file before
+            # a later YAML update fails.  Restore the exact prior bytes or
+            # remove only the newly-created target, never an unrelated file.
+            if template_written:
+                try:
+                    if previous_template is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.write_bytes(previous_template)
+                except OSError as rollback_exc:
+                    exc = CabfConfigError(f"模板配置失败且无法回滚模板文件：{rollback_exc}")
             self._show_error("模板保存失败", exc)
             return
         self.runtime.project_context.update(**{f"cabf_template_{self.side}": str(saved)})

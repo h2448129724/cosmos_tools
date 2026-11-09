@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
-from datasets import BinarySegmentationDataset
+from datasets import BinarySegmentationDataset, collect_training_pairs
 from losses import DiceLoss, MultiLabelDiceLoss, dice_coef, multilabel_dice_coef
 from model_registry import get_model
 
@@ -126,22 +126,9 @@ def train_model(
     elif not target_labels:
         raise ValueError("target_labels must not be empty for multilabel segmentation")
 
-    img_paths = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir) if f.endswith(".png")])
-    ann_paths = []
-    for img_path in img_paths:
-        base = os.path.splitext(os.path.basename(img_path))[0]
-        json_path = os.path.join(ann_dir, f"{base}.json")
-        png_path = os.path.join(ann_dir, f"{base}.png")
-        if os.path.isfile(json_path):
-            ann_paths.append(json_path)
-        elif os.path.isfile(png_path):
-            ann_paths.append(png_path)
-        else:
-            ann_paths.append(None)
-
     import random
 
-    paired = list(zip(img_paths, ann_paths))
+    paired = collect_training_pairs(img_dir, ann_dir)
     random.shuffle(paired)
     img_paths, ann_paths = zip(*paired)
 

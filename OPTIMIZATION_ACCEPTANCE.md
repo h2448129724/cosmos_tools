@@ -1,5 +1,25 @@
 # 工具箱优化验收 · 2026-09-29
 
+## 2026-09-30 · 整体 review 修复增补
+
+本轮改动位于嵌套工具箱仓库；未修改生产原图、历史 run.db、已有标注或 Conda 依赖，未提交/推送。
+
+- 训练运行：安全名称和目录归属、原子唯一目录、启动失败归档、stdout/stderr 排空后终态、快速结束信号顺序、取消/关闭和平台 PATH。
+- 模型工具：递归自动标注镜像输出目录；同 stem 不同扩展名冲突在写入前拒绝；训练按相对目录配对；小图和边缘滑窗写回；`keypoint`/`sew` 共用标签规则。
+- 配置工具：inline YAML 列表/映射、路径转义、保存前预检、配置提交失败恢复原模板或移除本次新模板。
+- 现场数据集：完整 PNG 容器与像素校验；有效人工标注仍可复用；历史导出逐样本暂停/停止，未完成目录保留 INCOMPLETE.txt 与状态报告。停止并导出仍完成已提交样本的导出。
+- 架构：现场批次执行从 Qt worker 移至 field_batch；18 个 core 登记 source-effect / inert-import gates。精确审核过的核心哈希迁移保留旧版本续跑，未放开未知算法变更。
+- 训练兼容：集中支持现代项目入口与当前 legacy Cosmos 布局，修复契约检查和连边导出的 load_project_package 导入失败；现代入口错误不静默降级。
+
+验证（现有 onnx-gpu）：
+
+1. `python -m pytest tests -q`：242 passed，6 subtests passed。
+2. `python -m cosmos_toolbox.training.verify_contracts`：passed=true。CPU 合成输入下分割 max_abs_diff=5.40e-08；针点 64×64 / 80×96 动态尺寸通过；连边双 ONNX max_abs_diff=1.19e-07。使用临时权重和目录，不是现场训练权重准确率验收。
+3. 隔离 UI gallery：960×640 下 26 个 capability 页面均成功打开/截图；真实持久化状态保持不变。截图在系统 TEMP/cosmos-review-fixes-ui-20260930。
+4. 人工查看现场数据集页面截图，表单滚动和主要动作可见；不把截图加载测试等同于全部交互验收。
+
+仍需真实业务样本验收：14 套现场模型按产品与面别的适用性、NAS 断连/断电、大批量吞吐，以及 JPG 有损压缩对微小缺陷识别的影响。此次未声称这些已通过。
+
 范围：当前 Cosmos 分支与嵌套 cosmos_toolbox 工作区。保留既有未提交修改；未更改生产算法、原图、已有标注或 Conda 依赖，未提交/推送。
 
 ## 实现

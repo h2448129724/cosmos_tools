@@ -89,9 +89,145 @@ def _quote_like(old_value: str, new_value: str) -> str:
     old_value = old_value.strip()
     if len(old_value) >= 2 and old_value[0] == old_value[-1] and old_value[0] in {"'", '"'}:
         quote = old_value[0]
-        escaped = new_value.replace(quote, f"\\{quote}")
+        if quote == "'":
+            # YAML single-quoted scalars escape a quote by doubling it; a
+            # backslash escape would silently produce invalid/changed paths.
+            escaped = new_value.replace("'", "''")
+        else:
+            # Double-quoted YAML scalars treat backslashes as escapes.
+            escaped = (
+                new_value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+            )
         return f"{quote}{escaped}{quote}"
-    return f'"{new_value}"'
+    escaped = (
+        new_value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+    return f'"{escaped}"'
+
+
+def _split_yaml_inline_comment(value: str) -> tuple[str, str]:
+    """Split an inline YAML value from its comment without parsing/reformatting."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip(), value[index:].rstrip()
+    return value.rstrip(), ""
+
+
+def _inline_sequence_item_spans(value: str) -> list[tuple[int, int]]:
+    """Return item spans inside an inline YAML sequence.
+
+    This deliberately only identifies top-level commas; quoted strings and
+    nested flow values are kept intact so a path containing a comma remains a
+    single item.
+    """
+    if not (value.startswith("[") and value.endswith("]")):
+        return []
+    inner_start, inner_end = 1, len(value) - 1
+    spans: list[tuple[int, int]] = []
+    start = inner_start
+    quote: str | None = None
+    escaped = False
+    depth = 0
+    for index in range(inner_start, inner_end):
+        char = value[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in "[{(":
+            depth += 1
+        elif char in "]})":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            spans.append((start, index))
+            start = index + 1
+    if value[inner_start:inner_end].strip() or spans:
+        spans.append((start, inner_end))
+    return spans
+
+
+def _patch_inline_match_template_path(line: str, side_index: int, new_value: str) -> str | None:
+    """Patch a flow-style ``match_template: [top, bottom]`` line in place."""
+    key_match = re.search(r"\bmatch_template\s*:\s*", line)
+    if key_match is None:
+        return None
+    prefix_end = key_match.end()
+    value, comment = _split_yaml_inline_comment(line[prefix_end:])
+    if not (value.lstrip().startswith("[") and value.rstrip().endswith("]")):
+        return None
+    leading = value[: len(value) - len(value.lstrip())]
+    flow = value.lstrip()
+    trailing = value[len(value.rstrip()) :]
+    spans = _inline_sequence_item_spans(flow)
+    if side_index < 0 or side_index >= len(spans):
+        raise CabfConfigError(f"inspection.match_template 缺少索引 {side_index} 的模板路径")
+    start, end = spans[side_index]
+    item = flow[start:end]
+    item_left = item[: len(item) - len(item.lstrip())]
+    item_right = item[len(item.rstrip()) :]
+    scalar = item.strip()
+    if scalar.startswith("{"):
+        path_match = re.search(r"\bpath\s*:\s*", scalar)
+        if path_match is None:
+            raise CabfConfigError(f"inspection.match_template 缺少索引 {side_index} 的模板路径")
+        value_start = path_match.end()
+        quote: str | None = None
+        escaped = False
+        value_end = len(scalar)
+        for index in range(value_start, len(scalar)):
+            char = scalar[index]
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char in {",", "}"}:
+                value_end = index
+                break
+        old_scalar = scalar[value_start:value_end].strip()
+        raw_value = scalar[value_start:value_end]
+        value_left = raw_value[: len(raw_value) - len(raw_value.lstrip())]
+        value_right = raw_value[len(raw_value.rstrip()) :]
+        scalar = (
+            scalar[:value_start]
+            + value_left
+            + _quote_like(old_scalar, new_value)
+            + value_right
+            + scalar[value_end:]
+        )
+        flow = flow[:start] + item_left + scalar + item_right + flow[end:]
+        return line[:prefix_end] + leading + flow + trailing + (f" {comment}" if comment else "")
+    flow = flow[:start] + item_left + _quote_like(scalar, new_value) + item_right + flow[end:]
+    return line[:prefix_end] + leading + flow + trailing + (f" {comment}" if comment else "")
 
 
 def _patch_match_template_path(text: str, side_index: int, new_value: str) -> str:
@@ -99,6 +235,13 @@ def _patch_match_template_path(text: str, side_index: int, new_value: str) -> st
     header_index = _find_yaml_key_line(lines, ("inspection", "match_template"))
     if header_index < 0:
         raise CabfConfigError("配置中没有找到 inspection.match_template")
+    header_line = lines[header_index]
+    newline = "\n" if header_line.endswith("\n") else ""
+    header_body = header_line[:-1] if newline else header_line
+    inline = _patch_inline_match_template_path(header_body, side_index, new_value)
+    if inline is not None:
+        lines[header_index] = inline + newline
+        return "".join(lines)
     base_indent = _line_indent(lines[header_index])
     current_item = -1
     for index in range(header_index + 1, len(lines)):
@@ -212,18 +355,30 @@ class CabfConfigDocument:
         self.original_text = patched
 
     def update_template_path(self, side: str, template_path: str | Path) -> str:
+        config_value = self.validate_template_path_update(side, template_path)
+        index = self.SIDE_INDEX[side]
+        templates = self.data.get("inspection", {}).get("match_template", [])
+        patched = _patch_match_template_path(self.original_text, index, config_value)
+        _atomic_write_with_backup(self.path, patched)
+        # Mutate the decoded document only after the textual patch succeeded;
+        # callers can safely retry after a malformed/unsupported YAML layout.
+        if isinstance(templates[index], dict):
+            templates[index]["path"] = config_value
+        else:
+            templates[index] = config_value
+        self.original_text = patched
+        return config_value
+
+    def validate_template_path_update(self, side: str, template_path: str | Path) -> str:
+        """Validate and render a template-path update without writing files."""
+        if side not in self.SIDE_INDEX:
+            raise CabfConfigError(f"不支持的侧别：{side}")
         index = self.SIDE_INDEX[side]
         config_value = path_for_config(Path(template_path))
         templates = self.data.get("inspection", {}).get("match_template", [])
         if not isinstance(templates, list) or index >= len(templates):
             raise CabfConfigError(f"inspection.match_template 缺少 {side.upper()} 配置")
-        if isinstance(templates[index], dict):
-            templates[index]["path"] = config_value
-        else:
-            templates[index] = config_value
-        patched = _patch_match_template_path(self.original_text, index, config_value)
-        _atomic_write_with_backup(self.path, patched)
-        self.original_text = patched
+        _patch_match_template_path(self.original_text, index, config_value)
         return config_value
 
 

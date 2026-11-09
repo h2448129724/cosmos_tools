@@ -3,6 +3,7 @@ numpy
 Pillow
 opencv-python
 PySide6
+openpyxl
 pyyaml
 torch
 torchvision

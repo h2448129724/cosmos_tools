@@ -162,6 +162,47 @@ def _make_center_slices(tile_size: int, center_size: int) -> Tuple[slice, slice]
     return slice(y0, y1), slice(x0, x1)
 
 
+def _tile_writeback_slices(
+    x0: int,
+    y0: int,
+    image_width: int,
+    image_height: int,
+    tile_size: int,
+    center_size: int,
+) -> Tuple[slice, slice, slice, slice]:
+    """Return image/tile slices for a boundary-aware tile core.
+
+    Tiles are padded when an image is smaller than ``tile_size`` or when a
+    final tile reaches an edge.  The old implementation always wrote the
+    fixed center slice, which could leave the outer border (or the whole
+    image for a small input) with zero vote count.  At an image boundary the
+    core is extended to the boundary; interior tiles still write only their
+    center to reduce seam artifacts.
+
+    The return order is ``(image_y, image_x, tile_y, tile_x)``.
+    """
+    center_y, center_x = _make_center_slices(tile_size, center_size)
+    y_start = 0 if y0 == 0 else center_y.start
+    y_stop = tile_size if y0 + tile_size >= image_height else center_y.stop
+    x_start = 0 if x0 == 0 else center_x.start
+    x_stop = tile_size if x0 + tile_size >= image_width else center_x.stop
+
+    # A padded tile can extend past the source image.  Clamp both image and
+    # tile coordinates while retaining the same local tile offset.
+    valid_tile_height = max(0, min(tile_size, image_height - y0))
+    valid_tile_width = max(0, min(tile_size, image_width - x0))
+    y_start = max(0, min(y_start, valid_tile_height))
+    y_stop = max(y_start, min(y_stop, valid_tile_height))
+    x_start = max(0, min(x_start, valid_tile_width))
+    x_stop = max(x_start, min(x_stop, valid_tile_width))
+    return (
+        slice(y0 + y_start, y0 + y_stop),
+        slice(x0 + x_start, x0 + x_stop),
+        slice(y_start, y_stop),
+        slice(x_start, x_stop),
+    )
+
+
 def run_inference_tiled(
     image_bgr: np.ndarray,
     model_path: str,
@@ -180,6 +221,8 @@ def run_inference_tiled(
     """
     if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
         raise ValueError("输入图像必须为 HxWx3 的BGR图像")
+    if int(batch_size) <= 0:
+        raise ValueError("batch_size must be > 0")
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     h, w, _ = image_rgb.shape
@@ -190,7 +233,6 @@ def run_inference_tiled(
 
     stride = int(center_size)
     coords = _iter_tiles(h, w, tile_size=tile_size, stride=stride)
-    cy, cx = _make_center_slices(tile_size=tile_size, center_size=center_size)
 
     prob_acc = np.zeros((h, w), dtype=np.float32)
     w_acc = np.zeros((h, w), dtype=np.float32)
@@ -212,12 +254,18 @@ def run_inference_tiled(
 
         for i, (x0, y0) in enumerate(batch_xy):
             p_tile = probs_np[i]
-            yy0 = y0 + cy.start
-            yy1 = y0 + cy.stop
-            xx0 = x0 + cx.start
-            xx1 = x0 + cx.stop
-            prob_acc[yy0:yy1, xx0:xx1] += p_tile[cy, cx]
-            w_acc[yy0:yy1, xx0:xx1] += 1.0
+            image_y, image_x, tile_y, tile_x = _tile_writeback_slices(
+                x0=x0,
+                y0=y0,
+                image_width=w,
+                image_height=h,
+                tile_size=tile_size,
+                center_size=center_size,
+            )
+            if image_y.start == image_y.stop or image_x.start == image_x.stop:
+                continue
+            prob_acc[image_y, image_x] += p_tile[tile_y, tile_x]
+            w_acc[image_y, image_x] += 1.0
 
         batch_imgs.clear()
         batch_xy.clear()

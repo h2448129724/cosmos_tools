@@ -27,10 +27,12 @@ from apps.cabf_flow.flow import CONFIG_PATH
 from .project_registry import get_registered_projects
 from .theme import APP_STYLESHEET
 from .tools.batch_crop_page import BatchCropPage
+from .tools.single_crop_page import SingleCropPage
 from .tools.image_filter_page import ImageFilterPage
 from .tools.inner_mask_page import InnerMaskPage
 from .tools.keyword_split_page import KeywordSplitPage
 from .tools.label_visualization_page import LabelVisualizationPage
+from .tools.point_mark_page import PointMarkPage
 from .tools.roi_editor_page import RoiConfigEditorPage
 from .tools.tile_crop_page import AutoTileCropPage
 from .tools.workflow_page import StitchWorkflowPage
@@ -57,11 +59,13 @@ class LabelingWorkspacePage(QWidget):
         self._tool_pages = [
             KeywordSplitPage(self),
             BatchCropPage(self),
+            SingleCropPage(self),
             AutoTileCropPage(self),
             RoiConfigEditorPage(self),
             InnerMaskPage(self),
             ImageFilterPage(self),
             LabelVisualizationPage(self),
+            PointMarkPage(self),
         ]
         self._project_tool_entries = (
             ("CAB-F 流程", "◎", "_show_cabf_workflow_dialog"),
@@ -162,6 +166,12 @@ class LabelingWorkspacePage(QWidget):
             outputs = self.config_data.setdefault("outputs", {})
             outputs["sew_point_train_out"] = str(Path(state.output_root) / "sew_point")
             outputs["sew_point_conntect_train_out"] = str(Path(state.output_root) / "sew_point_connect")
+        point_mark = next(
+            (page for page in self._tool_pages if getattr(page, "tool_key", "") == "point_mark"),
+            None,
+        )
+        if point_mark is not None and state.image_dir:
+            point_mark.configure_paths(image_dir=state.image_dir)
         self.show_status(f"已同步项目：{state.project_name or '未命名'}")
 
     # ----------------------------------------------------------- CAB-F launchers

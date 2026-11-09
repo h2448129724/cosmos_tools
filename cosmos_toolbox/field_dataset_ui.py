@@ -22,14 +22,7 @@ from PySide6.QtWidgets import (
 from .paths import ensure_import_paths
 
 
-def configured_product(path):
-    import yaml
-    document = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
-    inspection = document.get('inspection', {}) if isinstance(document, dict) else {}
-    product = inspection.get('product') if isinstance(inspection, dict) else None
-    if product not in {'D01-L', 'D01-R'}:
-        raise ValueError('配置文件 inspection.product 必须是 D01-L 或 D01-R')
-    return product
+from .field_batch import configured_product
 
 
 class DatasetWorker(QThread):
@@ -86,57 +79,14 @@ class DatasetWorker(QThread):
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
     def _run_batch(self):
-        from .field_history import new_batch, workspace_for, config_hash, read_run, validate_options
-        from .field_dataset import _json
-        jobs = self.options.get('jobs')
-        if jobs is None:
-            base = dict(self.options)
-            sources = base.pop('sources')
-            if base.get('product_config'):
-                base['product'] = configured_product(base['product_config'])
-            jobs = []
-            for source in sources:
-                options = {**base, 'source': source}
-                if len(sources) > 1:
-                    suffix = hashlib.sha256(str(Path(source).resolve()).casefold().encode()).hexdigest()[:12]
-                    options['output'] = str(Path(base['output']) / f'{Path(source).name}_{suffix}')
-                jobs.append({'options': options, 'environment': self.environment_name})
-        path, batch = new_batch(self.options['output'], jobs)
-        self.progress.emit({'message': f'批次清单已保存（包含尚未开始的文件夹）：{path}'})
-        results, errors = [], []
-        for index, job in enumerate(batch['jobs']):
-            while self.control.paused.is_set() and not self.control.stopped.wait(.1):
-                pass
-            if self.control.stopped.is_set():
-                break
-            options = dict(job['options'])
-            source = options['source']
-            self.progress.emit({'message': f'文件夹 {index + 1}/{len(batch["jobs"])}：{source}'})
-            job['status'] = 'running'
-            job['known_runs'] = [p.name for p in (workspace_for(options) / 'runs').glob('*.json')]
-            _json(path, batch)
-            try:
-                if config_hash(options) != job['config_hash']:
-                    raise ValueError('配置文件与批次保存时不同，已拒绝此任务，旧数据保留')
-                if options.get('resume_from'):
-                    validate_options(read_run(options['resume_from']), options)
-                self.environment_name = job.get('environment')
-                result = {'source': source, **self._run_one(options)}
-                if result.get('stopped'):
-                    self.control.stopped.set()
-                results.append(result)
-                job['result'] = result
-                job['status'] = 'stopped' if result.get('stopped') or self.control.stopped.is_set() else 'complete'
-                if result.get('failed_model_jobs') or result.get('export', {}).get('errors') or result.get('export', {}).get('preview_errors'):
-                    job['status'] = 'failed'
-            except Exception as exc:
-                message = f'{type(exc).__name__}: {exc}'
-                job.update(status='failed', error=message)
-                errors.append({'source': source, 'error': message})
-                self.progress.emit({'message': f'文件夹失败：{source}：{message}；其余任务按各自设置继续。'})
-            _json(path, batch)
-        self.result.emit({'batch': True, 'results': results, 'errors': errors,
-                          'stopped': self.control.stopped.is_set(), 'batch_manifest': str(path)})
+        from .field_batch import run_batch
+
+        def execute(options, environment):
+            self.environment_name = environment
+            return self._run_one(options)
+
+        self.result.emit(run_batch(self.options, self.environment_name, self.control,
+                                   self.progress.emit, execute))
 
     def _run_one(self, options):
         options = dict(options)
@@ -806,7 +756,7 @@ class FieldDatasetPage(QWidget):
         self.stop_button.setEnabled(False)
         self.stop_export_button.setEnabled(False)
         if self.worker and self.worker.options.get('export_only'):
-            self.status.setText('已请求停止：当前历史任务导出完成后停止，不再导出后续任务，请勿关闭程序…')
+            self.status.setText('已请求停止：完成当前样本后保存部分导出，不再处理后续样本和任务…')
             return
         self.status.setText("已请求停止并导出：正在完成当前原图，随后导出本次已完成数据，请勿关闭程序…"
                             if self.control.export_on_stop.is_set() else

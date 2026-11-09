@@ -127,6 +127,7 @@ def _page_factory_for(factory_key: str):
         "db_ng_export": _create_db_ng_export_activity,
         "png_compress": _create_png_compress_activity,
         "database": _create_database_activity,
+        "data_transfer": _create_data_transfer_activity,
         "cosmos_pipeline": _create_cosmos_pipeline_activity,
         "sew_point_connect": lambda runtime, parent: SewPointConnectActivity(
             runtime,
@@ -142,6 +143,15 @@ def _page_factory_for(factory_key: str):
         return factories[factory_key]
     except KeyError as exc:
         raise KeyError(f"Unknown page factory key: {factory_key}") from exc
+
+
+def _create_data_transfer_activity(runtime, parent):
+    from .data_transfer_ui import DataTransferPage
+
+    page = DataTransferPage(parent)
+    page.task_center = getattr(runtime, 'task_center', None)
+    page.protect_window_close(runtime.window)
+    return page
 
 
 def _create_png_compress_activity(runtime, parent):
@@ -181,24 +191,31 @@ def _create_dataset_review_activity(runtime, parent):
 
 def _create_labeling_tool_activity(runtime, parent, tool_name: str):
     from apps.labeling_ui.app.tools.batch_crop_page import BatchCropPage
+    from apps.labeling_ui.app.tools.single_crop_page import SingleCropPage
     from apps.labeling_ui.app.tools.image_filter_page import ImageFilterPage
     from apps.labeling_ui.app.tools.inner_mask_page import InnerMaskPage
     from apps.labeling_ui.app.tools.keyword_split_page import KeywordSplitPage
     from apps.labeling_ui.app.tools.label_visualization_page import LabelVisualizationPage
+    from apps.labeling_ui.app.tools.point_mark_page import PointMarkPage
     from apps.labeling_ui.app.tools.roi_editor_page import RoiConfigEditorPage
     from apps.labeling_ui.app.tools.tile_crop_page import AutoTileCropPage
 
     page_types = {
         "keyword": KeywordSplitPage,
         "batch_crop": BatchCropPage,
+        "single_crop": SingleCropPage,
         "tile_crop": AutoTileCropPage,
         "roi": RoiConfigEditorPage,
         "inner_mask": InnerMaskPage,
         "image_filter": ImageFilterPage,
         "label_visualization": LabelVisualizationPage,
+        "point_mark": PointMarkPage,
     }
     page = page_types[tool_name](runtime.window, parent)
     page.setProperty("ownsPageHeader", True)
+    if tool_name == "point_mark":
+        state = runtime.project_context.state
+        page.configure_paths(image_dir=state.image_dir or state.dataset_root)
     return page
 
 

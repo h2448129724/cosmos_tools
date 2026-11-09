@@ -230,6 +230,13 @@ def plan_default_capabilities(
             "labeling_tool:batch_crop",
         ),
         (
+            "data.single_crop",
+            "逐张裁剪",
+            "按固定尺寸逐张调整 ROI 位置并裁剪当前图片。",
+            ActivityStage.DATA,
+            "labeling_tool:single_crop",
+        ),
+        (
             "data.tile_crop",
             "自动分块",
             "将大图自动切分为规则小图。",
@@ -263,6 +270,13 @@ def plan_default_capabilities(
             "浏览图片与标注叠加结果。",
             ActivityStage.ANNOTATION,
             "labeling_tool:label_visualization",
+        ),
+        (
+            "annotation.point_mark",
+            "点位标注导出",
+            "在图片上滚轮缩放并按顺序标点，导出二维坐标列表。",
+            ActivityStage.ANNOTATION,
+            "labeling_tool:point_mark",
         ),
     )
     for order, (key, title, description, stage, factory_key) in enumerate(
@@ -335,6 +349,15 @@ def plan_default_capabilities(
                 page_factory_key="database",
                 order=40,
                 keywords=("数据库", "SQLite", "只读", "检测记录"),
+            ),
+            _page(
+                "data.transfer",
+                "数据库导出与 Excel NG 提取",
+                "只读导出 SQLite 为 Excel，再按日期与 NG 面筛选、检查和复制原图。",
+                ActivityStage.DATA,
+                page_factory_key="data_transfer",
+                order=41,
+                keywords=("数据库", "SQLite", "Excel", "xlsx", "NG", "原图", "复制", "导出"),
             ),
             _page(
                 "cabf.sew_point_connect",

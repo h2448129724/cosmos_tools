@@ -131,6 +131,71 @@ def _make_xanylabeling_json(image_basename: str, w: int, h: int, polygons: List[
     }
 
 
+def _annotation_output_path(image_path: str, image_root: str, output_root: str) -> str:
+    """Return a collision-free annotation path while retaining source layout.
+
+    ``auto_label_folder`` accepts recursive input trees.  Flattening every
+    image to ``output_root/<stem>.json`` loses samples such as
+    ``left/a.png`` and ``right/a.png``.  Mirroring the relative source path
+    keeps both the stable stem and its source identity for downstream tools.
+    """
+    source = os.path.abspath(image_path)
+    root = os.path.abspath(image_root)
+    try:
+        relative = os.path.relpath(source, root)
+    except ValueError as exc:  # pragma: no cover - only possible across drives
+        raise ValueError(f"图片目录与图片不在同一文件系统：{image_path}") from exc
+    relative_path = os.path.normpath(relative)
+    if relative_path == os.pardir or relative_path.startswith(os.pardir + os.sep):
+        raise ValueError(f"图片不在输入目录内：{image_path}")
+    return os.path.join(output_root, os.path.splitext(relative_path)[0] + ".json")
+
+
+def _plan_annotation_outputs(image_paths: Iterable[str], image_root: str, output_root: str) -> Dict[str, str]:
+    """Plan all output names and reject any remaining path collision.
+
+    Mirroring directories handles the usual recursive basename collision.  A
+    single directory can still contain ``sample.png`` and ``sample.jpg``;
+    both naturally map to ``sample.json``.  Failing before model loading or
+    writing prevents a silent overwrite and makes the source identity issue
+    actionable for the caller.
+    """
+    planned: Dict[str, str] = {}
+    collisions: Dict[str, List[str]] = {}
+    for image_path in image_paths:
+        output_path = _annotation_output_path(image_path, image_root, output_root)
+        key = os.path.normcase(os.path.abspath(output_path))
+        if key in planned:
+            collisions.setdefault(key, [planned[key]]).append(image_path)
+        else:
+            planned[key] = image_path
+    if collisions:
+        details = "; ".join(
+            f"{output}: {', '.join(sources)}" for output, sources in collisions.items()
+        )
+        raise ValueError(f"多个源图片映射到同一标注文件，拒绝覆盖：{details}")
+    return {source: _annotation_output_path(source, image_root, output_root) for source in planned.values()}
+
+
+def _image_path_for_annotation(image_path: str, annotation_path: str) -> str:
+    """Make ``imagePath`` resolve from the emitted JSON to its source image.
+
+    X-AnyLabeling resolves ``imagePath`` relative to the annotation file.  A
+    relative path therefore preserves the exact source even when two nested
+    directories contain the same basename, and remains portable when the
+    input/output trees are moved together.
+    """
+    try:
+        relative = os.path.relpath(
+            os.path.abspath(image_path), os.path.dirname(os.path.abspath(annotation_path))
+        )
+    except ValueError:
+        # Windows cannot express a relative path across drive letters.  An
+        # absolute path still preserves the exact source for X-AnyLabeling.
+        relative = os.path.abspath(image_path)
+    return relative.replace(os.sep, "/")
+
+
 def _load_image_rgb(path: str) -> np.ndarray:
     bgr = cv2.imread(path, cv2.IMREAD_COLOR)
     if bgr is None:
@@ -175,6 +240,11 @@ def main():
 
     _configure_pillow_max_pixels(bool(args.allow_large_images), args.max_image_pixels)
 
+    img_paths = sorted(list(_iter_image_paths(args.img_dir)))
+    if not img_paths:
+        raise FileNotFoundError(f"没有找到图片: {args.img_dir}")
+    output_paths = _plan_annotation_outputs(img_paths, args.img_dir, args.out_ann_dir)
+
     device = torch.device("cpu" if str(args.device).lower() == "cpu" else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
 
@@ -184,10 +254,6 @@ def main():
     model.eval()
 
     _safe_makedirs(args.out_ann_dir)
-
-    img_paths = sorted(list(_iter_image_paths(args.img_dir)))
-    if not img_paths:
-        raise FileNotFoundError(f"没有找到图片: {args.img_dir}")
 
     poly_cfg = PolyConfig(
         prob_thresh=float(args.prob_thresh),
@@ -201,7 +267,7 @@ def main():
     total_images = len(img_paths)
     for image_index, ip in enumerate(img_paths, start=1):
         base = os.path.basename(ip)
-        out_json = os.path.join(args.out_ann_dir, os.path.splitext(base)[0] + ".json")
+        out_json = output_paths[ip]
         if (not args.overwrite) and os.path.exists(out_json):
             print(f"自动标注 step {image_index:03d}/{total_images:03d} skip existing {base}")
             continue
@@ -215,7 +281,11 @@ def main():
         mask01 = (prob > poly_cfg.prob_thresh).astype(np.uint8)
         polygons = _mask_to_polygons(mask01, poly_cfg)
 
-        payload = _make_xanylabeling_json(base, w, h, polygons)
+        payload = _make_xanylabeling_json(_image_path_for_annotation(ip, out_json), w, h, polygons)
+        # Keep the original source identity available to consumers that do not
+        # resolve LabelMe's imagePath field relative to the JSON file.
+        payload["sourceImagePath"] = os.path.abspath(ip)
+        os.makedirs(os.path.dirname(out_json), exist_ok=True)
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 

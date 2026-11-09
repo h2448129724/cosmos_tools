@@ -25,8 +25,14 @@ def database(tmp_path):
             INSERT INTO inspection_result VALUES(4,'CAB','D01-L','d',0,0,'2026-09-24 10:00:00');
             INSERT INTO ng_error VALUES(1,0,'hook NG');
         ''')
-        db.execute('INSERT INTO image_file VALUES(1,1,?,?,?)', ('original.jpg', str(source/'original.jpg'), str(source/'missing.jpg')))
-        db.execute('INSERT INTO image_file VALUES(2,1,?,?,?)', ('original.jpg', str(source/'original.jpg'), ''))
+        db.execute(
+            'INSERT INTO image_file VALUES(1,1,?,?,?)',
+            (str(source / 'original.jpg'), str(tmp_path / 'cache-not-used.jpg'), str(source / 'missing.jpg')),
+        )
+        db.execute(
+            'INSERT INTO image_file VALUES(2,1,?,?,?)',
+            (str(source / 'original.jpg'), str(tmp_path / 'cache-not-used.jpg'), ''),
+        )
     return path
 
 
@@ -44,6 +50,20 @@ def test_readonly_scan_filters_dedup_and_missing(database):
     assert scan(database, end='2026-09-25')['summary']['ng_records'] == 1
     assert scan(database, exclude_misjudged=True)['summary']['ng_records'] == 1
     assert scan(database, product="' OR 1=1--")['summary']['ng_records'] == 0
+
+
+def test_raw_uses_filename_and_falls_back_when_filename_is_empty(database, tmp_path):
+    plan = scan(database)
+    assert plan['files'][0]['source'] == str(tmp_path / 'source' / 'original.jpg')
+    assert plan['summary']['ready_files'] == 1
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE image_file SET filename=''")
+        cache = tmp_path / 'cache.jpg'
+        cache.write_bytes(b'cache bytes')
+        db.execute('UPDATE image_file SET raw_image=?', (str(cache),))
+    fallback = scan(database)
+    assert fallback['files'][0]['source'] == str(cache)
+    assert fallback['summary']['ready_files'] == 1
 
 
 def test_copy_resume_and_nonoverwrite(database, tmp_path):

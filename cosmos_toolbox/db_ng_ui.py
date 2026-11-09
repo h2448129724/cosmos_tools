@@ -253,8 +253,10 @@ class DbNgPage(QWidget):
         kinds_layout.setContentsMargins(0, 0, 0, 0)
         self.raw = QCheckBox("原图")
         self.raw.setChecked(True)
+        self.raw.setToolTip("复制 image_file.filename 中的相机原图。filename 为空时才使用 raw_image。")
         self.raw_checkbox = self.raw
         self.result = QCheckBox("结果图")
+        self.result.setToolTip("复制 image_file.result_image 中的结果图。")
         self.result_checkbox = self.result
         kinds_layout.addWidget(self.raw)
         kinds_layout.addWidget(self.result)

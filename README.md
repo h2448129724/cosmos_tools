@@ -80,7 +80,29 @@ Segmentation 的“导出 ONNX”动作支持 `microunet` / `microunet_gn`、二
 - `cosmos_toolbox/page_router.py` / `route_state.py`：Qt 页面 router 与纯路由状态。
 - `cosmos_toolbox/workbench_state.py`：导航、header ownership、检查器、viewport 与任务摘要的纯 reducer。
 - `cosmos_toolbox/ui/`：全工作台共享 theme、primitives 与 responsive projection。
+- `apps/point_marking/point_core.py`：点位顺序、导出投影与二层列表文本编码的唯一规则来源。
+- `apps/labeling_ui/app/tools/point_mark_page.py`：点位标注画布、坐标表格与导出的 Qt adapter。
 - `cosmos_toolbox/app.py`：单窗口 Shell、能力导航、活动切换与统一样式。
+
+## 点位标注导出
+
+在左侧“标注与复核”分组打开“点位标注导出”：
+
+- “打开图片”读取一张图片，也支持把图片拖到画布上；打开新图会清空上一张图的点。
+- 滚轮以光标位置为锚点缩放（5%–3200%），中键拖动平移，“适配窗口”恢复整图可见。
+- 左键在图上标点，点按点击顺序编号；右键删除光标下的点，列表可单选后删除。
+- 坐标始终是原图像素坐标：预览降采样到最长边 4096 只影响显示，不影响坐标。
+- 右侧表格按顺序显示序号/X/Y，下方实时预览导出内容；“导出坐标 JSON”写出文件，“复制”直接写入剪贴板，“导入坐标”可以读回之前导出的文件。
+
+导出文件是一个二层列表：外层按标注顺序排列，每个元素是 `[x, y]`。
+
+```json
+[
+  [179, 219],
+  [279, 300],
+  [560, 220]
+]
+```
 
 ## Functional Core / Imperative Shell
 
@@ -106,9 +128,17 @@ conda run -n onnx-gpu python scripts/render_capability_gallery.py --output "$env
 
 ## 模型来源
 
+### 运行与导出安全约定
+
+- 训练项目名是名称而不是输出路径：路径分隔符、上级目录和 Windows 保留名称会规范化为安全名称，并检查路径不能逃逸运行根目录；每次运行使用独立身份，不复用同秒目录。
+- 现场数据集复用和导出会验证 PNG 完整容器、完整像素解码与标签尺寸。人工修改的有效 JSON 保留；损坏的已有样本不会被自动覆盖。
+- 历史导出支持在样本之间暂停、继续、停止。`export_state.json` 的 `complete` 表示流程完整结束；`stopped` / `failed` 或目录中的 `INCOMPLETE.txt` 表示不能把它当作完整数据集。`validation.json` 另记录数据与 preview 的校验结果。
+- “停止并导出”仍会先停止生成，再完成已提交样本的导出；普通停止及历史导出的停止，不再启动后续样本。编码/解码和当前文件复制内部不是强制中断点。
+- 现场批次执行位于 `field_batch.py`，Qt 页面仅提供执行与进度 adapter；历史清单和运行快照格式保持兼容。
+
 模型注册中心会先按任务和运行模式筛选兼容实现，再按优先级解析：CAB-F 根入口生产 factory（优先级 300）→ CAB-F 根入口训练 factory（200）→ 工具箱内随迁移代码保存的本地模型（100）→ 外部 Ultralytics（50）。
 
-CAB-F 根入口为缝纫点与连边任务公开惰性的生产 ONNX 推理 factory，只参与 `infer` 模式；训练和导出通过同一根入口取得项目内可训练模型，对应实现不可用时再使用工具箱本地迁移模型。工具箱不直接导入 CAB-F 的 implementation module。
+CAB-F 根入口为缝纫点与连边任务公开惰性的生产 ONNX 推理 factory，只参与 `infer` 模式；训练和导出通过同一入口取得项目内可训练模型。`training/cab_f_project.py` 集中适配两种布局：存在 `projects.load_project_package` 时使用现代公开入口；当前 legacy 分支则惰性映射至 `algo.cab_f` 与 `train` 的已有实现。现代入口初始化错误不会被静默降级；业务调用方不再各自判断分支布局。
 
 训练产物默认写入本工具箱的 `runs/` / `artifacts/`，不会自动覆盖 `assets/weights`。生产发布必须经过显式 ONNX 导出和兼容性验证。
 
@@ -118,6 +148,26 @@ CAB-F 根入口为缝纫点与连边任务公开惰性的生产 ONNX 推理 fact
 .\启动Cosmos工具箱.ps1 --preflight
 conda run -n onnx-gpu python -m cosmos_toolbox.training.verify_contracts
 ```
+## 数据库导出与 Excel NG 提取
+
+在左侧“数据准备”中打开“数据库导出与 Excel NG 提取”：
+
+1. **数据库 → Excel**：选择 SQLite 数据库和 `.xlsx` 输出路径。默认导出全部用户表；也可每行填写一个表名。每张表对应一个工作表，保留关联 ID、JSON 和图片路径；长文本拆列，大整数按文本保存。默认不覆盖已有文件。
+2. **Excel → NG 原图**：导出完成后自动填入 Excel 路径，也可直接选择其他电脑导出的 Excel。填写图片输出目录，按需设置原图盘符（默认 `E:`）、盘符映射根目录、检测起止时间和“只提取 NG 面”。先用“仅检查”查看源图缺失或目标冲突，再执行复制。
+
+默认提取 `inspection_result.ok=0` 的全部关联原图，包含正反面和人工误判记录；“只提取 NG 面”使用 `ng_error.file_id`。优先读取 `filename`，其次 `raw_image`，不使用 `result_image`。时间范围两端均包含边界，结束日期包含当天全部记录。
+
+复制平铺到输出目录，同名异源按来源目录加稳定前缀，保持正反面配对；相同内容跳过，不同内容不覆盖。实际复制自动生成 UTF-8 CSV 清单，含成功、缺失、冲突和未处理状态；页面显示前 200 条。仅检查默认不创建输出目录，也可指定新的 CSV 路径保存检查结果。图片任务可在文件之间停止；Excel 导出期间请等待完成后关闭窗口。两个步骤均在后台执行，记录到“任务与日志”。
+
+需要 `openpyxl`（当前 `onnx-gpu` 已包含）。工具箱内也提供命令行入口，参数与原脚本兼容：
+
+```powershell
+conda run -n onnx-gpu python scripts/export_db_to_excel.py --db D:/data/cosmos.db --output D:/data/cosmos.xlsx
+conda run -n onnx-gpu python scripts/copy_ng_images.py --excel D:/data/cosmos.xlsx --output D:/NG_recheck --source-root F:/ --start-date 2026-10-01 --end-date 2026-10-11 --dry-run
+```
+
+去掉 `--dry-run` 执行复制。已有“数据库 NG 图片提取”入口继续用于直接读取数据库的工作流。
+
 # 数据库浏览（只读）
 
 启动工具箱后，在“数据准备”分组中打开“数据库浏览（只读）”，点击“打开 / 刷新”。
